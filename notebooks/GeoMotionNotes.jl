@@ -714,6 +714,25 @@ _Published by Pluto — see [the Pluto documentation](https://featured.plutojl.o
 for how notebooks are structured and shared._
 """
 
+# ╔═╡ 4b6a0d27-9e81-4c5a-8b7f-3f2e8a1d5c04
+# ╠═╡
+fitted = begin
+    cached_fitted = normpath(joinpath(params.output_dir, "fitted_models.jld2"))
+    if reuse_saved_models && isfile(cached_fitted)
+        println("Reusing pre-computed movement models from: ", cached_fitted)
+        JLD2.load(cached_fitted, "fitted")
+    else
+        println("Fitting movement models via MCMC...")
+        res = GeoMotion.fit_movement_models(loaded, params)
+        mkpath(params.output_dir)
+        try
+            JLD2.save(cached_fitted, "fitted", res)
+        catch
+        end
+        res
+    end
+end
+
 # ╔═╡ 9a4c0b83-6d15-4e7b-8f3a-2b1d8e5c0a47
 # ╠═╡
 kernels = begin
@@ -746,25 +765,6 @@ path_res = begin
         mkpath(params.output_dir)
         try
             JLD2.save(cached_paths, "path_res", res)
-        catch
-        end
-        res
-    end
-end
-
-# ╔═╡ 4b6a0d27-9e81-4c5a-8b7f-3f2e8a1d5c04
-# ╠═╡
-fitted = begin
-    cached_fitted = normpath(joinpath(params.output_dir, "fitted_models.jld2"))
-    if reuse_saved_models && isfile(cached_fitted)
-        println("Reusing pre-computed movement models from: ", cached_fitted)
-        JLD2.load(cached_fitted, "fitted")
-    else
-        println("Fitting movement models via MCMC...")
-        res = GeoMotion.fit_movement_models(loaded, params)
-        mkpath(params.output_dir)
-        try
-            JLD2.save(cached_fitted, "fitted", res)
         catch
         end
         res
