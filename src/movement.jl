@@ -6511,6 +6511,14 @@ end
 Performs Bayesian posterior predictive validation by simulating mark-recapture
 events and assessing calibration via Brier score and Kullback-Leibler divergence.
 """
+function _month_key(t::Real)::String
+    yr = floor(Int, t)
+    mo = clamp(ceil(Int, (t - yr) * 12), 1, 12)
+    return "$(yr)-$(lpad(string(mo), 2, '0'))"
+end
+_month_key(::Missing) = "missing"
+_month_key(x) = "all"
+
 function posterior_predictive_check(
     loaded::NamedTuple,
     fitted::NamedTuple,

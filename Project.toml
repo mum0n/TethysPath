@@ -28,6 +28,7 @@ NearestNeighbors = "b8a86587-4115-5ab1-83bc-aa920d37bbce"
 OrderedCollections = "bac558e1-5e72-5ebc-8fee-abe8a469f55d"
 Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
 Shapefile = "8e980c4a-a4fe-5da2-b3a7-4b4b0353a2f4"
 SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
@@ -35,10 +36,15 @@ StatsBase = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
 TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 Turing = "fce5fe82-541a-59a6-adf8-730c64b5f9a0"
 Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
+ZMQ = "c2297ded-f4af-51ae-bb23-16f91089e4e1"
 
 [weakdeps]
 Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
 RCall = "6f49c342-dc21-5d91-9882-a32aef131414"
+
+[sources]
+GeoData = {path = "../GeoData"}
+GeoDataSources = {path = "../GeoDataSources"}
 
 [extensions]
 GeoMotionPlottingExt = "Plots"
@@ -46,6 +52,8 @@ GeoMotionRCallExt = "RCall"
 
 [compat]
 GeometryBasics = "0.5.13"
+Serialization = "1.11.0"
+ZMQ = "1.5.1"
 
 [extras]
 DynamicPPL = "366bfd00-2699-11ea-058f-f148b4cae6d8"
@@ -55,7 +63,3 @@ UUIDs = "cf7118a7-6976-5b1a-9a39-7adc72f591a4"
 
 [targets]
 test = ["Test", "DynamicPPL", "ForwardDiff", "UUIDs"]
-
-[sources]
-GeoData = {path = "..\\GeoData"}
-GeoDataSources = {path = "..\\GeoDataSources"}

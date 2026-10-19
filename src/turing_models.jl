@@ -449,7 +449,7 @@ win is correctness, plus removing the obstacle to a gradient sampler later.
 end
 
 """
-    joint_survey_telemetry_turing_model(counts, depths, releases, recaptures, ks, W, hsi, land_mask)
+    joint_survey_telemetry_turing_model(counts, depths, survey_units, releases, recaptures, ks, W, hsi, land_mask)
 
 Joint scientific survey density and mark-recapture telemetry model for a single,
 unstratified population.
@@ -473,6 +473,7 @@ declared in `model_modes` and something must answer for them.
 @model function joint_survey_telemetry_turing_model(
     counts::Vector{Int},
     depths::Vector{Float64},
+    survey_units::Vector{Int},
     releases::Vector{Int},
     recaptures::Vector{Int},
     ks::Vector{Int},
@@ -480,14 +481,21 @@ declared in `model_modes` and something must answer for them.
     hsi::Vector{Float64},
     land_mask::Union{Nothing, BitVector, Vector{Bool}}
 )
-    @warn "joint_survey_telemetry_turing_model has no survey density likelihood: " *
-          "counts/depths are ignored and this reduces to pure_telemetry_turing_model. " *
-          "See todo.md 1.6."
-
-    # Declared but unused -- see the note above. Present so the gap is visible.
+    # Survey density likelihood (Negative Binomial) at surveyed units.
     beta0      ~ Distributions.Normal(0.0, 5.0)
     beta_depth ~ Distributions.Normal(0.0, 2.0)
+    beta_hsi   ~ Distributions.Normal(1.0, 1.0)
     inv_r      ~ truncated(Distributions.Normal(0.0, 1.0), 0.0, Inf)
+    r          = 1.0 / (inv_r + 1e-6)
+
+    for n in eachindex(counts)
+        unit = survey_units[n]
+        h_u = clamp(hsi[unit], 1e-6, 1.0)
+        log_mu = beta0 + beta_depth * depths[n] + beta_hsi * log(h_u)
+        mu = exp(log_mu)
+        p = r / (r + mu)
+        counts[n] ~ Distributions.NegativeBinomial(r, p)
+    end
 
     mu_velocity  ~ truncated(Distributions.Normal(0.3, 0.2), 0.0, 0.95)
     mu_diffusion ~ truncated(Distributions.Normal(0.1, 0.2), 0.0, Inf)

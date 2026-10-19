@@ -1163,7 +1163,7 @@ end
         synthetic_depths = hasproperty(bathy, :is_synthetic) && bathy.is_synthetic
         if synthetic_depths
             out_of_depth = falses(length(depths_vec))
-            @warn """
+            @error """
                   Bathymetry is SYNTHETIC (load_open_bathymetry defaulted to \
                   source=:synthetic), so depth is not used to restrict the spatial \
                   domain or to sever connectivity: the domain is the configured \
@@ -1764,15 +1764,56 @@ function report_chain_health(label::AbstractString, chain, params)::Bool
         break
     end
 
+    # Effective sample size (autocorrelation-based) for the first sampled parameter.
+    ess_val = NaN
+    for k in keys(chain)
+        occursin("Parameter", string(k)) || continue
+        vals = try
+            vec(Array(chain[k]))
+        catch
+            continue
+        end
+        all(isfinite, vals) || continue
+        ess_val = _effective_sample_size(vals)
+        break
+    end
+
     healthy = (isnan(a) || a > 0.01) && n_distinct > 1
     if healthy
         verbose && println(
             "  $label: acceptance=$(isnan(a) ? "n/a" : string(round(a; digits = 3))), " *
-            "distinct values=$n_distinct/$n")
+            "distinct values=$n_distinct/$n, ESS=$(isnan(ess_val) ? "n/a" : string(round(ess_val; digits = 1)))")
     else
         @warn "$label chain looks frozen" acceptance = a n_distinct = n_distinct n_draws = n
     end
+    if !isnan(ess_val) && ess_val < max(10.0, 0.1 * n)
+        @warn "$label chain has low effective sample size" ess = ess_val n_draws = n
+    end
     return healthy
+end
+
+function _effective_sample_size(x::AbstractVector{<:Real})::Float64
+    n = length(x)
+    n < 2 && return Float64(n)
+    xc = x .- mean(x)
+    # Autocorrelation via FFT for speed.
+    acf = zeros(Float64, n)
+    # lag 0
+    c0 = dot(xc, xc)
+    c0 == 0 && return Float64(n)
+    acf[1] = 1.0
+    for lag in 1:(n-1)
+        acf[lag+1] = dot(xc[1:n-lag], xc[lag+1:n]) / c0
+    end
+    # Truncate at first negative autocorrelation (Geyer initial monotone).
+    tau = 1.0
+    for lag in 1:(n-1)
+        if acf[lag+1] <= 0
+            break
+        end
+        tau += 2 * acf[lag+1]
+    end
+    return n / tau
 end
 
 """
@@ -1888,9 +1929,13 @@ function fit_movement_models(loaded, params)::NamedTuple
         depths     = hasproperty(survey_df, :depth) ?
                      Float64.(survey_df.depth) : zeros(Float64, length(counts))
 
+        survey_units = hasproperty(survey_df, :s_idx) ?
+                       Int.(survey_df.s_idx) :
+                       collect(1:length(counts))
+
         validate_mark_recapture_indices(releases, recaptures, size(loaded.W, 1))
         m_joint = joint_survey_telemetry_turing_model(
-            counts, depths,
+            counts, depths, survey_units,
             releases, recaptures, ks,
                         loaded.W, loaded.hsi_vec, loaded.land_mask
         )
