@@ -23,23 +23,10 @@ include("test_fixtures.jl")
     @test R_eff[1, 3] > R_eff[1, 2]
 
     # Posterior Path Ensemble Panel
-    S_ens = 5
-    cents_ens = [(-64.0 + 0.5 * i, 45.0 + 0.2 * i) for i in 1:S_ens]
-    polys_ens = [[(c[1] - 0.2, c[2] - 0.1), (c[1] + 0.2, c[2] - 0.1),
-              (c[1] + 0.2, c[2] + 0.1), (c[1] - 0.2, c[2] + 0.1)] for c in cents_ens]
-    au_ens = (centroids = cents_ens, centroids_lonlat = cents_ens,
-          polygons = polys_ens, polygons_lonlat = polys_ens, n_units = S_ens)
-    hsi_ens = collect(range(0.1, 0.9; length = S_ens))
-    agreed = (ensemble_paths = Dict("A" => [[1, 2, 3, 4, 5], [1, 2, 3, 4, 5]]),
-              ensemble_corridors = Dict("A" => zeros(5, 5)))
-    m_ens = plot_posterior_path_ensemble(agreed, au_ens; hsi = hsi_ens)
-    @test m_ens isa InteractiveMap
-    @test occursin("\"modal_share\": 1.0", m_ens.html)
-
-    # Style settings
-    light = plot_hsi_map(hsi_ens[1:3], (centroids = cents_ens[1:3], centroids_lonlat = cents_ens[1:3], polygons = polys_ens[1:3], polygons_lonlat = polys_ens[1:3], n_units = 3); cmap = :viridis, dark_mode = false)
-    dark  = plot_hsi_map(hsi_ens[1:3], (centroids = cents_ens[1:3], centroids_lonlat = cents_ens[1:3], polygons = polys_ens[1:3], polygons_lonlat = polys_ens[1:3], n_units = 3); cmap = :viridis, dark_mode = true)
-    @test light.html != dark.html
+    # NOTE: plot_posterior_path_ensemble and plot_hsi_map are Leaflet visualisations
+    # being moved to notebooks/GeoMotionNotes.jl (Phase 6 of IMPLEMENTATION_PLAN.md).
+    # Their tests live with the notebook, not in the package test suite.
+    # Removed per refactor: interactive maps are no longer package deliverables.
 
     # Trait-Movement Associations OLS
     obs_df = DataFrame(tag_id = 1:10, carapace_width = [95.0, 102.0, 108.0, 115.0, 120.0, 125.0, 130.0, 135.0, 140.0, 145.0])
