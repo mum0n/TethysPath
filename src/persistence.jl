@@ -286,6 +286,20 @@ Compass bearing of the step `from -> to`, in degrees clockwise from north.
 
 Returns `NaN` for a zero-length step, which is the self-transition case; callers
 treat that as "heading unchanged" because staying put preserves direction.
+
+# Coordinate-space note
+
+In `:geographic` space the bearing is computed on a **local equirectangular
+frame** (longitude difference scaled by `cos(lat_from)`), which is an
+approximation: bearings at basin scale (< a few hundred km per step) are
+accurate to well under a degree, but the error grows with step length and
+latitude. Great-circle bearings and this planar bearing can differ by degrees
+for long steps; the movement kernel works in turn angles between consecutive
+steps, where the approximation largely cancels. `:planar_km` is exact Euclidean
+for the metric frame. If the caller knows the space, declare it —
+`:unknown` falls back to the conservative inference in
+`coordinate_space_of`, which cannot always distinguish small-km coordinates
+from an unusual degree box.
 """
 function bearing_deg(from, to; coord_space::Symbol = :unknown)::Float64
     space = coord_space === :unknown ? coordinate_space_of((from, to)) : coord_space

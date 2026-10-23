@@ -41,9 +41,11 @@ The framework is organized into six cohesive phases:
    â”‚      - Posterior predictive checks (Brier score, KL divergence)
    â”‚      - Optional full Bayesian MCMC ensemble path & corridor propagation
    â–¼
-[Phase 6] Export & Leaflet Dashboards
-          - Interactive HTML/SVG maps, animated tracks, and CSV summaries
+[Phase 6] Checkpoint & Notebook Dashboards
           - Full results checkpoint written: movement_results_checkpoint.jld2
+          - Interactive dashboards: notebooks/GeoMotionNotes.jl (Pluto)
+            - Posterior paths, corridor explorer, HSI overlays, circuit maps
+            - CSV summaries written by the pipeline in Phase 4-5
 ```
 
 ---
@@ -237,6 +239,33 @@ migratory pinch-points.
 3. Posterior predictive checks â†’ `posterior_predictive_summary.txt`,
    `movement_ppc_summary.html`
 
+**First-passage connectivity** (`--diagnostics=connectivity`, gated independently
+of `:validation`): coarse-grains the unit-level kernel onto the configured
+regions (`resolve_region_partition`: explicit `region_map` kwarg >
+`params.region_map` > region polygons in `loaded` > all-units fallback) and
+reports the row-stochastic region transition matrix, exact mean
+first-passage times, first-arrival CDFs over `fpt_horizon_steps`
+(`fpt_step_years` converts steps to years), corridor visit rates, a greedy
+modularity community partition (`n_communities`, adaptive when `0`), and
+minimum cuts in expected crossers per step â†’
+`connectivity_region_matrix.csv`, `connectivity_first_passage_summary.csv`,
+`connectivity_communities.csv`, `connectivity_corridor_usage.csv`,
+`connectivity_min_cut.csv`.
+
+**Recapture separation** (`--diagnostics=recapture`, gated independently of
+`:validation`): fits a multistate CJS model (Arnason-Schwarz) to the aggregated
+capture histories by seeded adaptive coordinate-wise random-walk Metropolis
+with an additional jointly-adapted full-vector proposal, separating apparent
+survival `phi`, detection `pdet` and between-region movement `psi` per year,
+and comparing `psi` against the kernel promoted to annual steps
+(`kernel_yearly`) â†’ `recapture_separation_summary.csv`,
+`recapture_movement_vs_kernel.csv`. Fewer than 3 capture occasions throws a
+loud `DomainError` (not jointly identifiable), recorded via `_record_panel_skip`.
+Both new fields (`connectivity_assessment`, `recapture_separation`) are stored
+in `movement_results_checkpoint.jld2` and rendered by Panels 7-8 of
+`notebooks/GeoMotionNotes.jl` (including region/community/corridor Leaflet
+overlay maps).
+
 **Bayesian ensemble** (`--diagnostics=bayesian_ensemble`): MCMC ensemble path
 & corridor propagation over posterior parameter draws.
 
@@ -244,13 +273,24 @@ Spectral graph wavelets were removed from the package.
 
 ---
 
-### Phase 6: Interactive Dashboard Export
+### Phase 6: Results Checkpoint & Notebook Dashboards
 
-Function: `export_dashboards(...)`
+The interactive Leaflet/HTML dashboards were consolidated into
+`notebooks/GeoMotionNotes.jl`, which loads the full results checkpoint and
+renders all panels (posterior paths, corridor explorer, HSI overlays, circuit
+current maps, validation summaries, plus the first-passage connectivity
+assessment with region/community/corridor overlay maps and the recapture
+separation posterior tables). Package-side `export_dashboards(...)` is a
+no-op shim kept only for backward compatibility of the pipeline wiring. The legacy
+dashboard source module (`src/dashboards.jl`) was removed from the package on
+2026-10-23 — the notebook is now the canonical location for interactive figures.
 
-Generates standalone HTML/SVG dashboards. After Phase 6 completes, writes
-`movement_results_checkpoint.jld2` containing all Phase 4â€“5 results, enabling
-`--figures-only=true` to regenerate all dashboards without recomputing anything.
+After Phase 5 completes, the pipeline writes `movement_results_checkpoint.jld2`
+containing all Phase 4-5 results. This checkpoint is the notebook's data source
+and enables `--figures-only=true` to re-render legacy dashboards without
+recomputing anything. See `FIGURE_CONVENTIONS.md` at the repository root for the
+figure conventions (`mode = :plots` vs `:leaflet`, the "degrade loudly" rule,
+and coordinate-space assumptions).
 
 ---
 
@@ -281,7 +321,10 @@ Generates standalone HTML/SVG dashboards. After Phase 6 completes, writes
 | `hsi_ood_floor` | `Float64` | `0.01` | HSI floor for out-of-depth nodes |
 | `max_paths` | `Int` | `25` | Maximum trajectories to reconstruct |
 | `path_methods` | `Vector{Symbol}` | `[:astar]` | `:astar`, `:viterbi` |
-| `diagnostics` | `Vector{Symbol}` | see config | `:circuit`, `:stochastic`, `:bottlenecks`, `:validation`, `:bayesian_ensemble` |
+| `diagnostics` | `Vector{Symbol}` | see config | `:circuit`, `:stochastic`, `:bottlenecks`, `:validation`, `:bayesian_ensemble`, `:connectivity`, `:recapture` |
+| `fpt_horizon_steps` | `Int` | `100` | First-arrival propagation horizon (kernel steps, `:connectivity`) |
+| `fpt_step_years` | `Float64` | `1/12` | Length of one kernel step in years (first passage & kernel comparison) |
+| `n_communities` | `Int` | `2` | Community count for connectivity assessment (adaptive when `0`) |
 | `n_samples` | `Int` | `200` | MCMC posterior draw count |
 | `n_warmup` | `Int` | `100` | MCMC warmup iterations |
 | `mh_proposal_scale` | `Float64` | `0.05` | Random-walk proposal width (Ã— prior SD) |
@@ -289,7 +332,7 @@ Generates standalone HTML/SVG dashboards. After Phase 6 completes, writes
 | `n_ensemble` | `Int` | `50` | Posterior draws for ensemble corridor propagation |
 | `hsi_se` | `Float64` | `0.08` | HSI observation standard error |
 | `propagate_hsi_error` | `Bool` | `true` | Propagate HSI uncertainty into corridors |
-| `render_html` | `Bool` | `true` | Export Leaflet HTML dashboards |
+| `render_html` | `Bool` | `false` | Export legacy Leaflet HTML dashboards (default off; dashboards live in `notebooks/GeoMotionNotes.jl`) |
 | `output_dir` | `String` | `"output"` | Output directory |
 | `resume_from_checkpoint` | `Bool` | `false` | Load `movement_checkpoint.jld2`, skip Phases 1â€“3 |
 | `figures_only` | `Bool` | `false` | Load `movement_results_checkpoint.jld2`, skip to Phase 6 |
@@ -310,8 +353,11 @@ julia --project=. GeoMotionRun.jl --config=configs/snowcrab.toml
 # Skip MCMC â€” load movement_checkpoint.jld2, run Phases 4â€“6
 julia --project=. GeoMotionRun.jl --config=configs/snowcrab.toml --resume=true
 
-# Regenerate all HTML dashboards only (requires prior successful run)
+# Regenerate legacy HTML dashboards only (requires prior successful run)
 julia --project=. GeoMotionRun.jl --config=configs/snowcrab.toml --figures-only=true
+
+# Interactive figures: open notebooks/GeoMotionNotes.jl in Pluto
+# (default run writes only CSVs, static figures and checkpoints)
 
 # Tweak styling and regenerate
 julia --project=. GeoMotionRun.jl --config=configs/snowcrab.toml `
@@ -334,6 +380,9 @@ julia --project=. GeoMotionRun.jl --config=configs/snowcrab.toml `
 | `--samples=<N>` | `n_samples` |
 | `--warmup=<N>` | `n_warmup` |
 | `--mh-proposal-scale=<v>` | `mh_proposal_scale` |
+| `--fpt-horizon=<N>` | `fpt_horizon_steps` |
+| `--fpt-step-years=<v>` | `fpt_step_years` |
+| `--n-communities=<N>` | `n_communities` |
 | `--n-draws=<N>` | `n_ensemble` |
 | `--output-dir=<path>` | `output_dir` |
 | `--resume=<bool>` | `resume_from_checkpoint` |
@@ -406,6 +455,9 @@ run_movement_analysis(params)
 
 ## 8. Output Directory Structure
 
+The `.html` files below are only written when `render_html = true`; by default a run
+produces the CSVs, the checkpoints, and the static report figures only.
+
 ```text
 output/
 â”œâ”€â”€ movement_checkpoint.jld2                   # Intermediate: loaded + fitted + kernels
@@ -417,6 +469,14 @@ output/
 â”œâ”€â”€ posterior_predictive_summary.txt
 â”œâ”€â”€ movement_path_metrics.csv
 â”œâ”€â”€ movement_agent_visit_frequency.csv
+â”‚
+â”œâ”€â”€ connectivity_region_matrix.csv               # Diagnostic :connectivity
+â”œâ”€â”€ connectivity_first_passage_summary.csv       #   (MFPT / arrival / median tables)
+â”œâ”€â”€ connectivity_communities.csv
+â”œâ”€â”€ connectivity_corridor_usage.csv
+â”œâ”€â”€ connectivity_min_cut.csv
+â”œâ”€â”€ recapture_separation_summary.csv             # Diagnostic :recapture
+â”œâ”€â”€ recapture_movement_vs_kernel.csv
 â”‚
 â”œâ”€â”€ movement_tracks_animated.html
 â”œâ”€â”€ movement_corridors_heatmap.html            # Aggregate Markov bridge corridor visitation

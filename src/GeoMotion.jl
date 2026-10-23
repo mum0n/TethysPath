@@ -4,8 +4,10 @@
 Standalone Spatial Animal Movement, Trajectory Reconstruction, and Ecological
 Connectivity Analysis Engine. Provides mark-recapture telemetry ingestion,
 stochastic transition kernel estimation, explicit Turing.jl probabilistic
-telemetry calibration, A* least-cost trajectory and corridor routing, electrical
-circuit theory pinchpoint analysis, and interactive Leaflet HTML dashboard generation.
+telemetry calibration, A* least-cost trajectory and corridor routing, and
+electrical circuit theory pinchpoint analysis. All interactive Leaflet HTML
+dashboards were consolidated into `notebooks/GeoMotionNotes.jl`, which consumes
+the full results checkpoint written by the pipeline; see FIGURE_CONVENTIONS.md.
 """
 module GeoMotion
 
@@ -44,8 +46,9 @@ include("turing_models.jl")
 include("persistence.jl")
 include("assimilation.jl")
 include("movement.jl")
+include("connectivity.jl")
+include("recapture.jl")
 include("circuit.jl")
-include("dashboards.jl")
 include("pipeline.jl")
 include("agent_movement.jl")
 
@@ -158,6 +161,27 @@ export
     plot_posterior_predictive_check,
     run_validation_analyses,
 
+    # First-passage connectivity assessment & recapture separation
+    resolve_region_partition,
+    region_transition_matrix,
+    mean_first_passage_times,
+    first_arrival_cdfs,
+    corridor_visit_rate,
+    connectivity_communities,
+    region_min_cut,
+    compute_connectivity_assessment,
+    export_connectivity_region_matrix,
+    export_connectivity_first_passage_summary,
+    export_connectivity_communities_csv,
+    export_connectivity_corridor_usage,
+    export_connectivity_min_cut,
+    build_recapture_histories,
+    recapture_loglikelihood,
+    fit_recapture_cjs,
+    run_recapture_diagnostics,
+    export_recapture_separation_summary,
+    export_recapture_movement_vs_kernel,
+
     # Electrical Circuit Theory & Ecological Pinchpoints
     Circuit,
     PosteriorCircuitResult,
@@ -172,43 +196,6 @@ export
     posterior_circuit_inference,
     get_circuit_paths,
     resistance_covariance_matrix,
-
-    # Interactive HTML / Leaflet & Plots Visualization
-    LeafletMap,
-    # NOTE: 18 `leaflet_*` names were exported from this list and defined nowhere.
-    # Importing any of them by name failed with UndefVarError, so the module's own
-    # export list did not describe what the package provides. They are removed
-    # rather than left as decoration -- see FIGURE_CONVENTIONS.md rule 6, degrade
-    # loudly. Building them is a template-engine change: the dashboards that exist
-    # are HTML built by Julia string concatenation, which cannot be made correct
-    # without first being made readable.
-    InteractiveMap,
-    save_html,
-    utm_to_lonlat,
-    lonlat_to_utm,
-    plot_choropleth,
-    plot_spatial_graph,
-    plot_tessellation_map,
-    show_map,
-    open_in_browser,
-    plot_hsi_map,
-    plot_diffusion_map,
-    plot_residence_time_map,
-    plot_advection_arrows,
-    plot_tracks_map,
-    plot_spacetime_map,
-    plot_movement_dashboard,
-    plot_interactive_corridor_dashboard,
-    plot_posterior_path_ensemble,
-    plot_dispersal_kernel,
-    plot_step_diagnostics,
-    plot_regional_connectivity,
-    plot_ad_ratio_distribution,
-    plot_hydrodynamic_dashboard,
-    plot_current_density_map,
-    export_movement_posterior_dashboard,
-    export_movement_flow_dashboard,
-    export_movement_summary_dashboard,
 
     # Configuration
     GeoMotionConfig,
@@ -249,7 +236,6 @@ export
     extract_transition_kernels,
     reconstruct_paths_and_diagnostics,
     compute_advanced_diagnostics,
-    export_dashboards,
     execute_validation_analyses,
     run_movement_analysis,
     PANEL_SKIPS,

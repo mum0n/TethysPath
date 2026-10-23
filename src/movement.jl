@@ -1295,7 +1295,21 @@ end
     haversine_distance(lon1::Real, lat1::Real, lon2::Real, lat2::Real; radius::Real=6378137.0)::Float64
 
 Computes the great-circle geodesic distance in metres between two points `(lon1, lat1)`
-and `(lon2, lat2)` in decimal degrees on a spherical Earth of radius `radius` (WGS84 mean radius).
+and `(lon2, lat2)` in decimal degrees on a spherical Earth of radius `radius`
+(default: the WGS84 *equatorial* radius `6378137.0 m`, i.e. ≈ `6378.137 km`).
+
+!!! note "Radius convention"
+    The default radius is the WGS84 **equatorial** radius, whereas
+    `lonlat_to_xy_km` projects with the Earth **mean** radius `R = 6371.0 km`
+    (≈ 0.11 % smaller). This is deliberate: the hex mesh and every stored
+    checkpoint were built with the projection's mean radius, so numbers agree
+    with themselves across releases. New code must not mix the two — mesh-
+    consistent distances come from `lonlat_to_xy_km`, displacement statistics
+    consistent with the checkpoints come from this function with its default.
+
+Inputs are `:geographic` coordinates (decimal degrees). Non-finite inputs return
+`NaN` rather than throwing; call sites that cannot tolerate `NaN` must check
+explicitly.
 
 # Mathematical Formula
 \$\\Delta\\phi = \\text{deg2rad}(\\text{lat}_2 - \\text{lat}_1), \\quad \\Delta\\lambda = \\text{deg2rad}(\\text{lon}_2 - \\text{lon}_1)\$
@@ -3104,6 +3118,14 @@ function astar_least_cost_path(
         return [release]
     end
 
+    # Non-finite weights would silently poison the sparse traversal-cost matrix;
+    # a NaN weight is nameless in the sparse structure and can corrupt the search.
+    all(isfinite, W) || throw(DomainError(
+        W,
+        "Adjacency matrix W contains a non-finite weight; A* traversal costs " *
+        "would be poisoned silently."
+    ))
+
     phi = if resistance !== nothing
         Float64.(resistance)
     elseif hsi !== nothing
@@ -3111,6 +3133,14 @@ function astar_least_cost_path(
     else
         ones(Float64, S)
     end
+    # A NaN HSI clamps to NaN (`clamp` cannot order NaN), and an Inf resistance
+    # propagates into every traversal cost and the heuristic, so the search would
+    # silently return arbitrary paths rather than degrade. Degrade loudly.
+    all(isfinite, phi) || throw(DomainError(
+        phi,
+        "A* resistance surface contains a non-finite value (raised from a NaN " *
+        "HSI or an Inf resistance); traversal costs would be poisoned silently."
+    ))
     min_phi = minimum(phi)
 
     W_active = copy(sparse(Float64.(W)))

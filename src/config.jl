@@ -30,7 +30,8 @@ These are the only places the allowed values are written down, so the CLI help,
 the default and the load-time validation cannot drift apart.
 """
 const DIAGNOSTIC_CHOICES = Set([:circuit, :stochastic, :bottlenecks,
-                                :validation, :bayesian_ensemble])
+                                :validation, :bayesian_ensemble,
+                                :connectivity, :recapture])
   const MODEL_MODE_CHOICES = Set([:telemetry, :telemetry_and_survey, :agent])
 const PATH_METHOD_CHOICES = Set([:astar, :viterbi])
 
@@ -163,9 +164,25 @@ Base.@kwdef struct GeoMotionConfig
         :circuit, :stochastic, :bottlenecks, :validation, :bayesian_ensemble
     ]
 
+    # --- Time-resolved connectivity (diagnostic :connectivity) ----------------
+    # Horizon, in kernel steps, over which first-arrival probabilities are
+    # propagated. One kernel step is the discrete interval the kernel was
+    # built for (a day for daily ingestion, a month for monthly).
+    fpt_horizon_steps::Int = 100
+    # Length of one kernel step in years, used to express mean first-passage
+    # times in calendar units. 1/12 for monthly ingestion, 1/365.25 for daily.
+    fpt_step_years::Float64 = 1.0 / 12.0
+    # Community partition size requested by the connectivity assessment
+    # (2 = split the domain in two stable connectivity units). 0 = adaptive.
+    n_communities::Int = 2
+
     # --- Output and reporting ------------------------------------------------
     species_name::String = "Animal"
-    render_html::Bool = true
+    # Interactive Leaflet HTML dashboards were consolidated into the notebook
+    # (notebooks/GeoMotionNotes.jl); the package defaults to rendering no HTML so a
+    # plain run writes only CSVs, figures and checkpoints. Override explicitly with
+    # --render-html=true to regenerate legacy dashboards.
+    render_html::Bool = false
     output_dir::String = "output"
     resume_from_checkpoint::Bool = false
     dark_mode::Bool = false
@@ -319,7 +336,8 @@ function apply_overrides(
         end
         if !haskey(effective_overlay, :diagnostics)
             effective_overlay[:diagnostics] = Symbol[
-                :circuit, :stochastic, :bottlenecks, :validation, :bayesian_ensemble
+                :circuit, :stochastic, :bottlenecks, :validation,
+                :bayesian_ensemble, :connectivity, :recapture
             ]
         end
     end
@@ -683,9 +701,28 @@ function create_argparse_settings()::ArgParseSettings
         # --- Diagnostics ------------------------------------------------------
         "--diagnostics"
             dest_name = "diagnostics"
-            help = "Comma-separated analyses: circuit, stochastic, bottlenecks, validation, bayesian_ensemble."
+            help = "Comma-separated analyses: circuit, stochastic, bottlenecks, " *
+                   "validation, bayesian_ensemble, connectivity, recapture."
             arg_type = String
             metavar = "ANALYSES"
+        "--fpt-horizon"
+            dest_name = "fpt_horizon_steps"
+            help = "First-passage horizon in kernel steps for the " *
+                   "connectivity assessment (--diagnostics=connectivity)."
+            arg_type = Int
+            metavar = "N"
+        "--fpt-step-years"
+            dest_name = "fpt_step_years"
+            help = "Length of one kernel step in years (1/12 monthly, " *
+                   "1/365.25 daily) for the connectivity assessment."
+            arg_type = Float64
+            metavar = "YEARS"
+        "--n-communities"
+            dest_name = "n_communities"
+            help = "Number of connectivity communities to partition the " *
+                   "regions into (0 = adaptive)."
+            arg_type = Int
+            metavar = "K"
 
         # --- Output and reporting ---------------------------------------------
         "--species-name"
@@ -695,7 +732,8 @@ function create_argparse_settings()::ArgParseSettings
             metavar = "NAME"
         "--render-html"
             dest_name = "render_html"
-            help = "Render interactive HTML dashboards."
+            help = "Render the legacy interactive HTML dashboards (default off; " *
+                   "dashboards live in notebooks/GeoMotionNotes.jl)."
             arg_type = Bool
         "--output-dir"
             dest_name = "output_dir"

@@ -16,6 +16,7 @@ end
 #   julia --project=. test/runtests.jl spatial        # Run spatial pruning & mesh
 #   julia --project=. test/runtests.jl kernel         # Run transition kernel & simulation
 #   julia --project=. test/runtests.jl diagnostics    # Run routing, circuits, vis & store
+#   julia --project=. test/runtests.jl numerics       # Run coordinate & robustness invariants
 #
 # Under `Pkg.test()` the whole suite runs; pass segments as test_args:
 #   Pkg.test(test_args = ["config", "spatial"])
@@ -40,6 +41,18 @@ const AVAILABLE_SEGMENTS = Dict{Symbol, @NamedTuple{file::String, desc::String}}
     :diagnostics => (
         file = "test_diagnostics_vis.jl",
         desc = "A* Routing, Circuit Theory, Interactive Visualisations & Lakehouse"
+    ),
+    :numerics => (
+        file = "test_numerics.jl",
+        desc = "Numerical Invariants, Coordinate-Space Properties & NaN/Inf Robustness"
+    ),
+    :connectivity => (
+        file = "test_connectivity.jl",
+        desc = "First Passage, Communities, Minimum Cuts & Corridor Usage"
+    ),
+    :recapture => (
+        file = "test_recapture.jl",
+        desc = "Multistate Recapture Separation: Survival x Detection x Movement"
     )
 )
 

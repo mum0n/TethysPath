@@ -126,6 +126,20 @@ function build_sparse_transition_kernel(
     end
     rho_shared = unit_residence ? zero(T) : clamp(T(residence), T(0), T(0.999))
 
+    # A NaN or Inf habitat value silently kills a transition row: comparisons
+    # with NaN are false, so the assembled entry never survives the
+    # `val > 1e-12` tail filter, and the kernel loses row-stochasticity instead
+    # of failing. Only units the kernel actually reads must be finite —
+    # land-masked units short-circuit to a self-loop before `hsi[i]` is touched.
+    for i in 1:S
+        (!isnothing(land_mask) && land_mask[i]) && continue
+        isfinite(T(hsi[i])) || throw(DomainError(
+            (i, hsi[i]),
+            "Habitat suitability at marine unit $i is non-finite; a NaN/Inf HSI " *
+            "would silently produce a non-stochastic kernel row."
+        ))
+    end
+
     for i in 1:S
         rho = unit_residence ? clamp(T(residence[i]), T(0), T(0.999)) : rho_shared
         w_move = one(T) - rho

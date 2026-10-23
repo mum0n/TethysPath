@@ -73,6 +73,13 @@ function build_circuit_laplacian(
     for j in 1:S
         for i in 1:S
             w_ij = Float64(W[i, j])
+            # A NaN or Inf weight flows through the clamps below *silently*
+            # (every comparison with NaN is false), so reject it at the source.
+            isfinite(w_ij) || throw(DomainError(
+                (i, j, w_ij),
+                "Adjacency weight W[$i, $j] is non-finite; a NaN/Inf conductance " *
+                "would silently poison the Laplacian and all resistance results."
+            ))
             w_ij <= 0.0 && continue
 
             # Zero out land units if land_mask provided
@@ -85,10 +92,20 @@ function build_circuit_laplacian(
                 if conductance isa AbstractMatrix
                     c_ij = Float64(conductance[i, j])
                 else
+                    isfinite(Float64(conductance[i])) || throw(DomainError(
+                        (i, conductance[i]),
+                        "Conductance at unit $i is non-finite; a NaN/Inf value " *
+                        "would silently poison the Laplacian."
+                    ))
                     c_ij = w_ij * sqrt(max(1e-6, Float64(conductance[i])) *
                                        max(1e-6, Float64(conductance[j])))
                 end
             elseif !isnothing(resistance)
+                isfinite(Float64(resistance[i])) || throw(DomainError(
+                    (i, resistance[i]),
+                    "Resistance at unit $i is non-finite; a NaN/Inf value " *
+                    "would silently poison the Laplacian."
+                ))
                 r_i = max(1e-6, Float64(resistance[i]))
                 r_j = max(1e-6, Float64(resistance[j]))
                 c_ij = w_ij * (2.0 / (r_i + r_j))
@@ -98,11 +115,13 @@ function build_circuit_laplacian(
                 # with alpha = 1.0 recovering the default habitat weighting.
                 h_i = Float64(hsi[i])
                 h_j = Float64(hsi[j])
-                (h_i < 0.0 || h_i > 1.0) && throw(DomainError(
-                    h_i, "Circuit HSI for unit $i must reside in [0, 1]."
+                # The two-sided form `h >= 0 && h <= 1` also rejects NaN, which
+                # the original `h < 0 || h > 1` comparison silently admitted.
+                (h_i >= 0.0 && h_i <= 1.0) || throw(DomainError(
+                    h_i, "Circuit HSI for unit $i must reside in [0, 1] and be finite."
                 ))
-                (h_j < 0.0 || h_j > 1.0) && throw(DomainError(
-                    h_j, "Circuit HSI for unit $j must reside in [0, 1]."
+                (h_j >= 0.0 && h_j <= 1.0) || throw(DomainError(
+                    h_j, "Circuit HSI for unit $j must reside in [0, 1] and be finite."
                 ))
                 c_ij = w_ij * exp(0.5 * Float64(hsi_exponent) * (h_i + h_j))
             end
