@@ -34,8 +34,8 @@ using UUIDs
 
 # ╔═╡ 8e2b6d47-3f19-4c7b-8d5a-1f4c9b2e0a36
 # ╠═╡
-using GeoMotion
-const MovementAnalysis = GeoMotion
+using TethysPath
+const MovementAnalysis = TethysPath
 
 # ╔═╡ 7f3c9e52-4b18-4d6a-8e05-2c9b1d6a3f47
 # ╠═╡
@@ -48,7 +48,7 @@ using PlutoUI
 # ╔═╡ 9d4e1b72-8c05-4a63-b7e1-6f0d3a8c5e21
 # ╠═╡
 md"""
-# GeoMotion — Results Viewer
+# TethysPath — Results Viewer
 
 This notebook loads **stored** pipeline results and displays them. It does **not** run any
 models on initiation: the expensive Bayesian fitting, kernel construction, path
@@ -69,9 +69,9 @@ stored results.
 ## Checkpoint compatibility
 
 Both shipped checkpoints (`output/movement_results_checkpoint.jld2` and
-`output/movement_checkpoint.jld2`) store Julia types under the `GeoMotion.*` module
+`output/movement_checkpoint.jld2`) store Julia types under the `TethysPath.*` module
 name and load with **no JLD2 reconstruction warnings**. The
-`const MovementAnalysis = GeoMotion` alias below is kept only as a legacy bridge for
+`const MovementAnalysis = TethysPath` alias below is kept only as a legacy bridge for
 older checkpoints written before the package was renamed; it is not required for the
 migrated files. The field mappings used by this notebook against the checkpoint
 (`loaded.mesh.n_units`, `kernels.P_kernel` row-stochastic, `path_res.paths`,
@@ -94,11 +94,32 @@ visualisations without recomputing anything.
 # ╠═╡
 cd(joinpath(@__DIR__, ".."))
 
+# ╔═╡ 2b7f5d93-1e48-4c0a-8f6d-9a1c4e7b0d36
+# ╠═╡
+md"""
+> ⚠️ **WARNING: STORE OVERWRITE HAZARD**
+>
+> Executing the model manually below will overwrite the existing checkpoints in the
+> lakehouse / storage store (`output/movement_results_checkpoint.jld2`).
+> By default, `run_model = false` to prevent accidental overwrites and use
+> existing stored results. Toggle `run_model = true` only when an explicit recomputation is intended.
+"""
+
+# ╔═╡ 2b7f5d93-1e48-4c0a-8f6d-9a1c4e7b0d37
+# ╠═╡
+@bind run_model PlutoUI.CheckBox(default = false)
+
 # ╔═╡ e1000001-0001-0001-0001-000000000100
 # ╠═╡
 output_dir = "output"
 results_checkpoint = joinpath(output_dir, "movement_results_checkpoint.jld2")
 intermediate_checkpoint = joinpath(output_dir, "movement_checkpoint.jld2")
+
+if run_model
+    @info "Manual run requested. Overwriting store and executing movement analysis pipeline..."
+    cfg = TethysPath.load_config(config_path = "configs/snowcrab.toml")
+    TethysPath.run_movement_analysis(cfg)
+end
 
 if isfile(results_checkpoint)
     @info "Loading stored results from: $results_checkpoint"
@@ -114,7 +135,7 @@ if isfile(results_checkpoint)
     recapture_separation    = get(validation, :recapture_separation, nothing)
     results_source = "results_checkpoint"
 elseif isfile(intermediate_checkpoint)
-    @warn "Only the intermediate checkpoint found (no full results). Some visualisations will be unavailable."
+    @warn "Only intermediate checkpoint found. Some visualisations will be unavailable."
     ic = JLD2.load(intermediate_checkpoint)
     loaded       = ic["loaded"]
     fitted       = ic["fitted"]
@@ -128,50 +149,16 @@ elseif isfile(intermediate_checkpoint)
     recapture_separation    = nothing
     results_source = "intermediate_checkpoint"
 else
+    loaded       = nothing
+    kernels      = nothing
+    path_res     = nothing
+    diagnostics  = nothing
+    validation   = nothing
+    agent_trajectories = nothing
+    agent_space_use    = nothing
     connectivity_assessment = nothing
     recapture_separation    = nothing
-    @bind show_run_snippet PlutoUI.CheckBox(default = false)
-    if show_run_snippet
-        md"""
-        ## Stored results not found
-
-        No pipeline results are available to visualise. The notebook searched for:
-
-        - `$(abspath(results_checkpoint))`
-        - `$(abspath(intermediate_checkpoint))`
-
-        ### Run the pipeline first (toggle to show commands)
-
-        **Via CLI:**
-        ```bash
-        julia --project=. GeoMotionRun.jl --config=configs/snowcrab.toml
-        ```
-
-        **Via Julia session:**
-        ```julia
-        using Pkg
-        Pkg.activate(".")
-        using GeoMotion
-        params = GeoMotion.load_config(config_path = "configs/snowcrab.toml")
-        GeoMotion.run_movement_analysis(params)
-        ```
-
-        After the pipeline completes, reopen this notebook and the stored results will load automatically.
-        """
-    else
-        md"""
-        ## Stored results not found
-
-        No pipeline results are available to visualise. The notebook searched for:
-
-        - `$(abspath(results_checkpoint))`
-        - `$(abspath(intermediate_checkpoint))`
-
-        _Click the checkbox above to show the commands to run the pipeline._
-
-        After the pipeline completes, reopen this notebook and the stored results will load automatically.
-        """
-    end
+    results_source = "not_found"
 end
 
 # ╔═╡ e1000001-0001-0001-0001-000000000101
@@ -565,7 +552,224 @@ end
 
 # ╔═╡ e1000001-0001-0001-0001-000000000122
 # ╠═╡
-_leaflet_map_html(loaded, path_res)
+md"""
+### Interactive Starting Location & Evolution Tracking
+
+Click anywhere on the map to set an inspection point $(\lambda_0, \phi_0)$. The notebook finds
+the $n$ closest starting locations / release centroids, simulates or traces their forward
+trajectories over the movement kernel, and visualises their spatial pathways.
+"""
+
+# ╔═╡ e1000001-0001-0001-0001-000000000140
+# ╠═╡
+@bind map_probe html"""
+<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 820px; margin: 0 0 10px 0;">
+  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+    <span style="font-size: 13px; font-weight: 600; color: #2d3748;">
+      Domain Spatial Map (Click to select location & track closest starting points)
+    </span>
+    <span id="motion_coord_display" style="font-size: 12px; font-family: monospace; color: #4a5568; background: #edf2f7; padding: 2px 8px; border-radius: 4px;">
+      Selected Probe: 44.5000°N, -61.0000°W
+    </span>
+  </div>
+  <div id="interactive_motion_map" style="height: 420px; width: 100%; border-radius: 8px; border: 1px solid #cbd5e0; box-shadow: 0 1px 3px rgba(0,0,0,0.1); z-index: 1;"></div>
+</div>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+const container = currentScript.parentElement;
+const mapDiv = container.querySelector('#interactive_motion_map');
+const displaySpan = container.querySelector('#motion_coord_display');
+
+let currentVal = { lon: -61.0, lat: 44.5 };
+container.value = currentVal;
+
+function setupMotionMap() {
+  if (typeof L === 'undefined') {
+    setTimeout(setupMotionMap, 60);
+    return;
+  }
+  if (mapDiv._leaflet_id) {
+    return;
+  }
+
+  const map = L.map(mapDiv, {
+    center: [currentVal.lat, currentVal.lon],
+    zoom: 6,
+    minZoom: 4,
+    maxZoom: 10
+  });
+
+  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}', {
+    attribution: 'Tiles &copy; Esri, GEBCO, NOAA',
+    maxZoom: 10
+  }).addTo(map);
+
+  let marker = L.marker([currentVal.lat, currentVal.lon], {
+    draggable: true
+  }).addTo(map);
+
+  function updatePoint(lat, lon) {
+    const rlat = Math.round(lat * 10000) / 10000;
+    const rlon = Math.round(lon * 10000) / 10000;
+    displaySpan.innerText = `Selected Probe: ${rlat.toFixed(4)}°N, ${rlon.toFixed(4)}°W`;
+    container.value = { lon: rlon, lat: rlat };
+    container.dispatchEvent(new CustomEvent('input'));
+  }
+
+  marker.on('dragend', function(e) {
+    const pos = e.target.getLatLng();
+    updatePoint(pos.lat, pos.lng);
+  });
+
+  map.on('click', function(e) {
+    marker.setLatLng(e.latlng);
+    updatePoint(e.latlng.lat, e.latlng.lng);
+  });
+
+  setTimeout(() => { map.invalidateSize(); }, 200);
+}
+
+setupMotionMap();
+</script>
+"""
+
+# ╔═╡ e1000001-0001-0001-0001-000000000141
+# ╠═╡
+@bind n_closest PlutoUI.Slider(1:1:25, default = 5, show_value = true)
+
+# ╔═╡ e1000001-0001-0001-0001-000000000142
+# ╠═╡
+# Identify n_closest starting locations and simulate their forward trajectory evolution
+tracked_evolution = begin
+    if isnothing(loaded) || isnothing(kernels) || !hasproperty(kernels, :P_kernel)
+        nothing
+    else
+        cents = nothing
+        if hasproperty(loaded.mesh, :centroids_lonlat) && !isempty(loaded.mesh.centroids_lonlat)
+            cents = loaded.mesh.centroids_lonlat
+        elseif hasproperty(loaded.mesh, :centroids) && !isempty(loaded.mesh.centroids)
+            cents = loaded.mesh.centroids
+        end
+
+        if cents === nothing || isempty(cents)
+            nothing
+        else
+            probe_lon = get(map_probe, :lon, -61.0)
+            probe_lat = get(map_probe, :lat, 44.5)
+            
+            # Compute Euclidean distance in degree space to each unit centroid
+            dists = [sqrt((c[1] - probe_lon)^2 + (c[2] - probe_lat)^2) for c in cents]
+            p = sortperm(dists)
+            n_sel = min(n_closest, length(cents))
+            chosen_nodes = p[1:n_sel]
+
+            # Forward simulate trajectories using the movement kernel
+            # 20 steps projection from each selected starting location
+            trajs = TethysPath.simulate_agent_trajectories(
+                n_sel,
+                chosen_nodes,
+                20,
+                kernels.P_kernel;
+                seed = 1234,
+                centroids = cents
+            )
+
+            (nodes = chosen_nodes, distances = dists[chosen_nodes], centroids = cents, trajs = trajs)
+        end
+    end
+end
+
+# ╔═╡ e1000001-0001-0001-0001-000000000143
+# ╠═╡
+if isnothing(tracked_evolution)
+    _leaflet_map_html(loaded, path_res)
+else
+    # Render map with highlighted chosen starting nodes and projected pathways
+    let
+        cents = tracked_evolution.centroids
+        trajs = tracked_evolution.trajs
+        nodes = tracked_evolution.nodes
+        n_units = length(cents)
+        c_lon = mean([c[1] for c in cents])
+        c_lat = mean([c[2] for c in cents])
+
+        # Colors for tracked agents
+        track_colors = ["#e11d48", "#2563eb", "#059669", "#d97706", "#7c3aed",
+                        "#db2777", "#0891b2", "#ea580c", "#4f46e5", "#16a34a"]
+
+        # Markers for chosen starting nodes
+        node_markers = []
+        for (idx, node_id) in enumerate(nodes)
+            c = cents[node_id]
+            col = track_colors[(idx - 1) % length(track_colors) + 1]
+            push!(node_markers, "{lat: $(c[2]), lon: $(c[1]), color: \"$col\", label: \"Start Node $node_id (Rank $idx)\"}")
+        end
+        node_markers_js = join(node_markers, ",")
+
+        # Paths for simulated forward agent trajectories
+        track_paths = []
+        for (idx, agent_traj) in enumerate(trajs)
+            col = track_colors[(idx - 1) % length(track_colors) + 1]
+            coords = []
+            for unit_id in agent_traj
+                if 1 <= unit_id <= n_units
+                    push!(coords, "[$(cents[unit_id][2]), $(cents[unit_id][1])]")
+                end
+            end
+            if length(coords) > 1
+                coords_str = "[" * join(coords, ",") * "]"
+                push!(track_paths, "{coords: $coords_str, color: \"$col\", agent: $idx}")
+            end
+        end
+        track_paths_js = "[" * join(["{coords: $(tp.coords), color: \"$(tp.color)\", agent: $(tp.agent)}" for tp in track_paths], ",") * "]"
+
+        map_uid = "track-map-" * string(uuid4())
+        HTML("""
+        <div id="$(map_uid)" style="width:100%; height:500px; border:1px solid #334155; border-radius:8px;"></div>
+        <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+        <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+        <script>
+          (function() {
+            var mapDiv = document.getElementById('$(map_uid)');
+            if (!mapDiv) return;
+            var map = L.map(mapDiv).setView([$(c_lat), $(c_lon)], 7);
+            L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+              maxZoom: 10,
+              attribution: '© OpenStreetMap contributors, © CARTO'
+            }).addTo(map);
+
+            var startNodes = [$(node_markers_js)];
+            startNodes.forEach(function(m) {
+              L.circleMarker([m.lat, m.lon], {
+                radius: 8,
+                color: m.color,
+                fillColor: m.color,
+                fillOpacity: 0.9,
+                weight: 2
+              }).bindPopup(m.label).addTo(map);
+            });
+
+            var tracks = $(track_paths_js);
+            tracks.forEach(function(t) {
+              L.polyline(t.coords, {color: t.color, weight: 3, opacity: 0.85})
+               .bindPopup("Agent " + t.agent + " Forward Pathway (" + t.coords.length + " steps)")
+               .addTo(map);
+            });
+
+            if (startNodes.length > 0) {
+              map.fitBounds(startNodes.map(function(m) { return [m.lat, m.lon]; }));
+            }
+          })();
+        </script>
+        <div style="margin-top:10px; font-size:13px; color:#475569;">
+          <b>Tracked Starting Locations & Evolution Pathways:</b> Showing $(length(nodes)) closest units to probe coordinate.
+        </div>
+        """)
+    end
+end
 
 # ╔═╡ e1000001-0001-0001-0001-000000000127
 # ╠═╡
@@ -835,7 +1039,7 @@ md"""
 ## Notes
 
 - **No models run on notebook load.** This notebook only reads stored results. To regenerate
-  results, run `julia --project=. GeoMotionRun.jl --config=configs/snowcrab.toml` first.
+  results, run `julia --project=. TethysPathRun.jl --config=configs/snowcrab.toml` first.
 - **No HTML dashboards.** The package no longer contains dashboard code
   (`src/dashboards.jl` was deleted; `export_dashboards` is a no-op shim). Visualisations
   are produced in-notebook from the stored results.
@@ -896,6 +1100,8 @@ end
 # ╠═9d4e1b72-8c05-4a63-b7e1-6f0d3a8c5e21
 # ╠═2b7f5d93-1e48-4c0a-8f6d-9a1c4e7b0d35
 # ╠═5c1d8e64-2a79-4b5f-9e07-3d6a1c8b4f29
+# ╠═2b7f5d93-1e48-4c0a-8f6d-9a1c4e7b0d36
+# ╠═2b7f5d93-1e48-4c0a-8f6d-9a1c4e7b0d37
 # ╠═7f3c9e52-4b18-4d6a-8e05-2c9b1d6a3f47
 # ╠═c1000001-0001-0001-0001-000000000200
 # ╠═e1000001-0001-0001-0001-000000000100
@@ -921,6 +1127,10 @@ end
 # ╠═e1000001-0001-0001-0001-000000000120
 # ╠═e1000001-0001-0001-0001-000000000121
 # ╠═e1000001-0001-0001-0001-000000000122
+# ╠═e1000001-0001-0001-0001-000000000140
+# ╠═e1000001-0001-0001-0001-000000000141
+# ╠═e1000001-0001-0001-0001-000000000142
+# ╠═e1000001-0001-0001-0001-000000000143
 # ╠═e1000001-0001-0001-0001-000000000123
 # ╠═e1000001-0001-0001-0001-000000000124
 # ╠═e1000001-0001-0001-0001-000000000125

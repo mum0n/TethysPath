@@ -1,5 +1,5 @@
-name = "GeoMotion"
-uuid = "418fd3b6-71cc-4fb5-aa96-19c2d8994255"
+name = "TethysPath"
+uuid = "70ddba99-1b01-45c8-ab22-98c532950d36"
 version = "0.1.0"
 authors = ["Jae S. Choi"]
 
@@ -18,12 +18,9 @@ DynamicPPL = "366bfd00-2699-11ea-058f-f148b4cae6d8"
 FFTW = "7a1cc6ca-52ef-59f5-83cd-3a7055c09341"
 FlexiChains = "4a37a8b9-6e57-4b92-8664-298d46e639f7"
 ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
-GeoData = "9b6fcbb8-86d6-11e9-1ce7-23a6bb139a78"
-GeoDataSources = "5d0d5f0e-2b6c-4a7e-9f3d-1c8b7a6e5d4f"
 GeoDatasets = "ddc7317b-88db-5cb5-a849-8449e5df04f9"
 GeoInterface = "cf35fbd7-0cd7-5166-be24-54bfbe79505f"
 GeoJSON = "61d90e0f-e114-555e-ac52-39dfb47a3ef9"
-GeoPartitioning = "8f39e3ce-31f2-4cbc-add5-3c97d226e5da"
 GeometryBasics = "5c1252a2-5f33-56bf-86c9-59e7332b4326"
 Graphs = "86223c79-3864-5bf0-83f7-82e725a168b6"
 HypertextLiteral = "ac1192a8-f4b3-4bfe-ba22-af5b92cd3ab2"
@@ -42,6 +39,7 @@ SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 StatsBase = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
 TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
+Tethys = "013929ef-fbce-4b30-8473-b78df773f4d1"
 Turing = "fce5fe82-541a-59a6-adf8-730c64b5f9a0"
 Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
 ZMQ = "c2297ded-f4af-51ae-bb23-16f91089e4e1"
@@ -51,13 +49,11 @@ Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
 RCall = "6f49c342-dc21-5d91-9882-a32aef131414"
 
 [sources]
-GeoData = {path = "../GeoData"}
-GeoDataSources = {path = "../GeoDataSources"}
-GeoPartitioning = {path = "C:/Users/Nathalie/projects/GeoPartitioning"}
+Tethys = {path = "../Tethys"}
 
 [extensions]
-GeoMotionPlottingExt = "Plots"
-GeoMotionRCallExt = "RCall"
+TethysPathPlottingExt = "Plots"
+TethysPathRCallExt = "RCall"
 
 [compat]
 AbstractPPL = "0.15.6"
@@ -65,11 +61,11 @@ DimensionalData = "0.30.2"
 DynamicPPL = "0.42.14"
 FlexiChains = "0.6.43"
 ForwardDiff = "1.4.6"
-GeoPartitioning = "0.1"
 GeometryBasics = "0.5.13"
 HypertextLiteral = "1.0.0"
 PlutoUI = "0.7.83"
 Serialization = "1.11.0"
+Tethys = "0.1"
 ZMQ = "1.5.1"
 
 [extras]

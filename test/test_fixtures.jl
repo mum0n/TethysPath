@@ -1,5 +1,5 @@
 using Test
-using GeoMotion
+using TethysPath
 using LinearAlgebra
 using SparseArrays
 using Random
@@ -16,7 +16,7 @@ using JSON
 using UUIDs
 using LibGEOS
 
-const TEST_TMP = joinpath(pkgdir(GeoMotion), "test_tmp")
+const TEST_TMP = joinpath(pkgdir(TethysPath), "test_tmp")
 mkpath(TEST_TMP)
 
 struct ParName

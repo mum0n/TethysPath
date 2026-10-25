@@ -24,7 +24,7 @@ include("test_fixtures.jl")
 
     # Posterior Path Ensemble Panel
     # NOTE: plot_posterior_path_ensemble and plot_hsi_map are Leaflet visualisations
-    # being moved to notebooks/GeoMotionNotes.jl (Phase 6 of IMPLEMENTATION_PLAN.md).
+    # being moved to notebooks/TethysPathNotes.jl (Phase 6 of IMPLEMENTATION_PLAN.md).
     # Their tests live with the notebook, not in the package test suite.
     # Removed per refactor: interactive maps are no longer package deliverables.
 
@@ -38,11 +38,11 @@ include("test_fixtures.jl")
     @test assoc.models["displacement"].r2 > 0.9
 
     # Failed panels recording
-    sk = GeoMotion.PANEL_SKIPS
+    sk = TethysPath.PANEL_SKIPS
     empty!(sk)
-    GeoMotion._record_panel_skip("Widget", ErrorException("boom"))
+    TethysPath._record_panel_skip("Widget", ErrorException("boom"))
     @test length(sk) == 1
-    @test GeoMotion.report_panel_skips() == 1
+    @test TethysPath.report_panel_skips() == 1
     empty!(sk)
 
     # Input assimilation
@@ -57,9 +57,9 @@ include("test_fixtures.jl")
     JLD2.save(joinpath(input_dir, "hsi.jld2"), "sims", hsi_assim.sims, "years", hsi_assim.years, "auids", hsi_assim.auids)
     JLD2.save(joinpath(input_dir, "sppoly.jld2"), "graph", Graphs.SimpleGraph(4), "sppoly", sppoly)
 
-    r_assim = GeoMotion.assimilate_movement_inputs(input_dir = input_dir, store_dir = store_dir, verbose = false)
+    r_assim = TethysPath.assimilate_movement_inputs(input_dir = input_dir, store_dir = store_dir, verbose = false)
     @test r_assim.written == ["tagging", "hsi", "sppoly"]
-    back_assim = GeoMotion.read_assimilated_movement_inputs(store_dir = store_dir)
+    back_assim = TethysPath.read_assimilated_movement_inputs(store_dir = store_dir)
     @test size(back_assim.tagging, 1) == 3
     rm(tmp_assim; recursive = true, force = true)
 end

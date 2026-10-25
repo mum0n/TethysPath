@@ -1,5 +1,5 @@
 # ==============================================================================
-#  assimilation.jl -- the external inputs, converted into the GeoData store
+#  assimilation.jl -- the external inputs, converted into the Tethys store
 # ==============================================================================
 #
 #  Movement analysis starts from three files someone else produced: a mark-recapture
@@ -11,7 +11,7 @@
 #  The separation this file makes:
 #
 #      data/*.jld2   the externally supplied inputs, read-only, never written to
-#      lakehouse/GeoMotion/   the assimilated store, GeoData-native, built once
+#      lakehouse/TethysPath/   the assimilated store, Tethys-native, built once
 #
 #  The store is a directory with three artefacts plus a manifest:
 #
@@ -20,7 +20,7 @@
 #      sppoly.arrow      the spatial units and their coordinates
 #      manifest.toml   what was assimilated, from where, and from which bytes
 #
-#  Arrow for the tables and Zarr for the array, because those are what GeoData's own
+#  Arrow for the tables and Zarr for the array, because those are what Tethys's own
 #  backends read: `geoload` on the array, `Arrow.Table` on the tables. Nothing here
 #  interprets the science -- it moves bytes, records where they came from, and refuses
 #  to overwrite a newer artefact.
@@ -44,7 +44,7 @@ using TOML
 """
     movement_store_root() -> String
 
-Where the assimilated movement store lives: `projects/lakehouse/GeoMotion`, beside
+Where the assimilated movement store lives: `projects/lakehouse/TethysPath`, beside
 the other halves' stores, so the lakehouse layout is one directory per package.
 
 The default is a path relative to this file Ã¢â‚¬â€ `src/` is two levels below the workspace root,
@@ -55,7 +55,7 @@ with the lakehouse somewhere else.
 function movement_store_root()::String
     override = get(ENV, "MOVEMENT_STORE_ROOT", "")
     isempty(override) || return abspath(override)
-    return GeoData.lakehouse_dir("GeoMotion")
+    return Tethys.lakehouse_dir("TethysPath")
 end
 
 """
@@ -100,7 +100,7 @@ end
 """
     assimilate_movement_inputs(; ...) -> NamedTuple
 
-Convert the externally supplied inputs into the GeoData store, skipping anything already
+Convert the externally supplied inputs into the Tethys store, skipping anything already
 up to date.
 
 Three conversions, one per input:
@@ -334,11 +334,11 @@ function _assimilate_hsi(source::AbstractString, target::AbstractString; verbose
     length(years) == size(sims, 2) || error(
         "$(source) has $(length(years)) years for $(size(sims, 2)) month steps.")
 
-    crs = GeoData.CoordinateSystem(crs = "EPSG:4326")
+    crs = Tethys.CoordinateSystem(crs = "EPSG:4326")
     nx, nm, nd = size(sims)
-    d_unit = _dim(:unit, collect(Float64, auids), "1", "spatial unit id", GeoData.DIM_SPATIAL)
-    d_month = _dim(:month, collect(1.0:nm), "1", "monthly step index", GeoData.DIM_TEMPORAL)
-    d_draw = _dim(:draw, collect(1.0:nd), "1", "posterior draw", GeoData.DIM_PARAMETRIC)
+    d_unit = _dim(:unit, collect(Float64, auids), "1", "spatial unit id", Tethys.DIM_SPATIAL)
+    d_month = _dim(:month, collect(1.0:nm), "1", "monthly step index", Tethys.DIM_TEMPORAL)
+    d_draw = _dim(:draw, collect(1.0:nd), "1", "posterior draw", Tethys.DIM_PARAMETRIC)
 
     ds = GeoDataset(
         Dict{String, GeoArray}("sims" => GeoArray(Array{Float64}(sims),
@@ -348,22 +348,22 @@ function _assimilate_hsi(source::AbstractString, target::AbstractString; verbose
             :auids => GeoArray(collect(Float64, auids), (d_unit,), crs, Dict{String, Any}()),
             :month => GeoArray(collect(1.0:nm), (d_month,), crs, Dict{String, Any}()),
             :draw => GeoArray(collect(1.0:nd), (d_draw,), crs, Dict{String, Any}())),
-        Dict{Symbol, GeoData.Dimension}(:unit => d_unit, :month => d_month, :draw => d_draw),
+        Dict{Symbol, Tethys.Dimension}(:unit => d_unit, :month => d_month, :draw => d_draw),
         crs,
         Dict{String, Any}(
             "years" => collect(Int, years),
             "layout" => "sims[unit, month, draw]; month is the step index the monthly " *
                         "matrix is built from, and `years` maps it to calendar years",
             "title" => "Assimilated habitat suitability series"),
-        GeoData.ZarrBackend(), target)
+        Tethys.ZarrBackend(), target)
 
-    GeoData.geosave(target, ds; backend = :zarr, overwrite = true)
+    Tethys.geosave(target, ds; backend = :zarr, overwrite = true)
     verbose && println("    sims$(size(sims)) + $(length(years)) years, " *
                        "$(length(auids)) units -> $(basename(target))")
     return target
 end
 
-_dim(name, coords, units, standard_name, dim_type) = GeoData.Dimension(
+_dim(name, coords, units, standard_name, dim_type) = Tethys.Dimension(
     name = name, size = length(coords), coords = coords,
     units = units, standard_name = standard_name, dim_type = dim_type)
 
@@ -372,7 +372,7 @@ getkey(d, k) = haskey(d, k) ? d[k] : nothing
 """
     read_assimilated_movement_inputs(; store_dir = movement_store_root())
 
-The assimilated store, read back through GeoData: the `GeoDataset` for the array and
+The assimilated store, read back through Tethys: the `GeoDataset` for the array and
 `Arrow.Table` for the tables.
 
 The HSI dataset is self-describing — the store records the dimensions it was written with, so
@@ -397,7 +397,7 @@ function read_assimilated_movement_inputs(;
         (isdir(path) || isfile(path)) || error(
             "The store at $(store_dir) has no $(name). Run `assimilate_movement_inputs()`.")
     end
-    hsi = GeoData.geoload(hsi_path; backend = :zarr)
+    hsi = Tethys.geoload(hsi_path; backend = :zarr)
     auids = haskey(hsi.coords, :unit) ? collect(Int, hsi.coords[:unit].data) : Int[]
     return (
         hsi = hsi,

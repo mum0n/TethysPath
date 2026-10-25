@@ -1,9 +1,9 @@
-# Default movement analysis configuration for GeoMotion
+# Default movement analysis configuration for TethysPath
 # =============================================================================
-# Canonical reference configuration for GeoMotion.
+# Canonical reference configuration for TethysPath.
 # All parameters are present with their declared defaults and complete explanations.
 #
-#   julia --project=. GeoMotionRun.jl --config=configs/default.toml \
+#   julia --project=. TethysPathRun.jl --config=configs/default.toml \
 #          --tagging-file=data/tagging.jld2 \
 #          --hsi-file=data/hsi.jld2 --sppoly-file=data/sppoly.jld2
 #
@@ -87,7 +87,7 @@ rest_advantage_form = "difference"
 # -----------------------------------------------------------------------------
 # Bathymetry & Environmental Habitat Sources
 # -----------------------------------------------------------------------------
-# Ingestion of real physical habitat via GeoData / GeoDataSources:
+# Ingestion of real physical habitat via Tethys / GeoDataSources:
 use_geodata_habitat = false          # Query real bathymetry and bottom temperature
 bathymetry_source = "etopo2022"      # "etopo2022", "nwa", or path to .nc/.zarr
 temperature_source = "woa23"         # Hydrography provider: "woa23", "glorys12v1"

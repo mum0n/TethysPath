@@ -2,7 +2,7 @@
     spatial_utils.jl
 
 Self-contained spatial partitioning, hexagonal mesh generation, bathymetric
-extraction, hydrodynamic modeling, and field resharding for GeoMotion.
+extraction, hydrodynamic modeling, and field resharding for TethysPath.
 """
 
 using LinearAlgebra
@@ -13,27 +13,24 @@ using DataFrames
 using Statistics
 using Dates
 
-# Geometric/coordinate hex-mesh primitives are owned by the GeoPartitioning
-# package (extracted from the bstm partitioning engine). The copies that used
-# to live in this file were verified equivalent (byte-identical, modulo one
-# comment line and an alternative shoelace implementation with identical
-# behaviour) before being dropped in favour of these imports. GeoMotion keeps
+# Geometric/coordinate hex-mesh primitives are owned by Tethys.Partitioning
+# (the Tethys partitioning engine). TethysPath keeps
 # its own simplified `assign_spatial_units` (hexagonal-only), its
 # `map_to_units`, and its `build_hex_mesh_clipped` extension.
 #
 # `map_point_to_units` is imported with `import` rather than `using` because
-# movement.jl extends it with a GeoMotion-specific method
+# movement.jl extends it with a TethysPath-specific method
 # `map_point_to_units(df::DataFrame, au::NamedTuple)` for land/water-masked
 # nearest-centroid snapping; cross-package method extension requires an
 # explicit import.
-using GeoPartitioning:
+using Tethys.Partitioning:
     lonlat_to_xy_km,
     xy_km_to_lonlat,
     build_hex_mesh_planar,
     get_polygon_area
-import GeoPartitioning: map_point_to_units
+import Tethys.Partitioning: map_point_to_units
 
-# NOTE: GeoPartitioning already provides the two-argument convenience overload
+# NOTE: Tethys.Partitioning already provides the two-argument convenience overload
 # `get_polygon_area(s_x, s_y)` on the imported function, so the re-definition
 # that used to sit at the bottom of this file (and duplicate that method) is
 # gone; extending a foreign package's function from this precompiled module
@@ -724,35 +721,35 @@ function load_open_bathymetry(;
 
     elev = zeros(Float64, nx, ny)
     loaded_from_file = false
-    # Check for GeoData or file-based ingestion
+    # Check for Tethys or file-based ingestion
     if source in (:etopo, :etopo2022, :geodata, "etopo", "etopo2022", "geodata")
         try
             bathy_file = joinpath("inputs", "bathymetry.zarr")
             bounds = ((min_lon, max_lon), (min_lat, max_lat))
-            bathy_ds = GeoData.geoget(
+            bathy_ds = Tethys.geoget(
                 "erddap://ETOPO_2022_v1_15s";
                 cache_dir = "inputs",
                 bounds = bounds,
                 verbose = false
             )
-            itp = GeoData.get_bathymetry_interpolator(bathy_ds)
+            itp = Tethys.get_bathymetry_interpolator(bathy_ds)
             for j in 1:ny, i in 1:nx
                 elev[i, j] = itp(lons[i], lats[j])
             end
             loaded_from_file = true
         catch err
-            @warn "Failed to load GeoData bathymetry: $(err). Falling back to file/synthetic."
+            @warn "Failed to load Tethys bathymetry: $(err). Falling back to file/synthetic."
         end
     elseif source isa AbstractString && (endswith(lowercase(source), ".zarr") || endswith(lowercase(source), ".nc")) && ispath(source)
         try
-            bathy_ds = GeoData.geoload(source)
-            itp = GeoData.get_bathymetry_interpolator(bathy_ds)
+            bathy_ds = Tethys.geoload(source)
+            itp = Tethys.get_bathymetry_interpolator(bathy_ds)
             for j in 1:ny, i in 1:nx
                 elev[i, j] = itp(lons[i], lats[j])
             end
             loaded_from_file = true
         catch err
-            @warn "Failed to parse GeoData file '$(source)': $(err). Falling back to synthetic shelf model."
+            @warn "Failed to parse Tethys file '$(source)': $(err). Falling back to synthetic shelf model."
         end
     elseif source isa AbstractString && isfile(source)
         ext = lowercase(splitext(source)[2])

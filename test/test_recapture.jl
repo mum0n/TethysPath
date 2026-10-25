@@ -28,7 +28,7 @@ include("test_fixtures.jl")
         # Tag B: release only (2020.5) -> never-recaptured in (region 1, 2020).
         # Tag C: release only (2021.0, unit 2) -> never in (region 2, 2021).
         # Tag D: release only (2021.0, unit 1) -> never in (region 1, 2021).
-        hist = GeoMotion.build_recapture_histories(df; region_map = mapping)
+        hist = TethysPath.build_recapture_histories(df; region_map = mapping)
 
         @test hist.occasions == [2020, 2021, 2022]
         @test hist.n_tags == 4
@@ -54,7 +54,7 @@ include("test_fixtures.jl")
             s_idx = [1, 3, 2, 1, 2, 1, 2],
             is_dead = [false, false, false, false, false, false, true],
         )
-        hist_dead = GeoMotion.build_recapture_histories(df_dead;
+        hist_dead = TethysPath.build_recapture_histories(df_dead;
             region_map = mapping)
         @test hist_dead.n_events == 6   # the dead row is excluded
         @test hist_dead.n_tags == 4
@@ -70,12 +70,12 @@ include("test_fixtures.jl")
             s_idx = [1, 1, 1, 1, 1, 1],
             is_dead = [false, false, false, false, false, false],
         )
-        hist = GeoMotion.build_recapture_histories(df; region_map = mapping)
+        hist = TethysPath.build_recapture_histories(df; region_map = mapping)
         psi_1 = [1.0;;]
 
-        ll_good = GeoMotion.recapture_loglikelihood(
+        ll_good = TethysPath.recapture_loglikelihood(
             [0.8], [0.5], psi_1, hist)
-        ll_bad = GeoMotion.recapture_loglikelihood(
+        ll_bad = TethysPath.recapture_loglikelihood(
             [0.05], [0.05], psi_1, hist)
         @test isfinite(ll_good)
         @test isfinite(ll_bad)
@@ -84,7 +84,7 @@ include("test_fixtures.jl")
         @test ll_good > ll_bad
 
         # An impossible model (detection = 1 after an observed gap) is -Inf.
-        ll_impossible = GeoMotion.recapture_loglikelihood(
+        ll_impossible = TethysPath.recapture_loglikelihood(
             [1.0], [1.0], psi_1, hist)
         @test ll_impossible == -Inf
     end
@@ -142,12 +142,12 @@ include("test_fixtures.jl")
             s_idx = [1, 1, 2, 2],
             is_dead = [false, false, false, false],
         )
-        @test_throws DomainError GeoMotion.run_recapture_diagnostics(
+        @test_throws DomainError TethysPath.run_recapture_diagnostics(
             (n_spatial = 2, data = (; tagging = df_two)), kernels_stub;
             region_map = [1, 2])
 
         full_loaded = (n_spatial = 2, data = (; tagging = df_gen))
-        result = GeoMotion.run_recapture_diagnostics(
+        result = TethysPath.run_recapture_diagnostics(
             full_loaded, kernels_stub, params_stub;
             region_map = [1, 2],
             n_warmup = 400,
@@ -179,7 +179,7 @@ include("test_fixtures.jl")
         @test result.kernel_yearly[1, 2] ≈ 1.0 atol = 1e-12
 
         # Reproducibility: same seed, same posterior mean.
-        result_repeat = GeoMotion.run_recapture_diagnostics(
+        result_repeat = TethysPath.run_recapture_diagnostics(
             full_loaded, kernels_stub, params_stub;
             region_map = [1, 2],
             n_warmup = 400,
@@ -189,7 +189,7 @@ include("test_fixtures.jl")
 
         # CSV export smoke test.
         out_dir = joinpath(TEST_TMP, "recapture_csv")
-        result_csv = GeoMotion.run_recapture_diagnostics(
+        result_csv = TethysPath.run_recapture_diagnostics(
             full_loaded, kernels_stub, params_stub;
             region_map = [1, 2],
             n_warmup = 400,

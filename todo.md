@@ -1,14 +1,14 @@
-# GeoMotion — Remaining Work Items
+# TethysPath — Remaining Work Items
 
-Tracking items for the GeoMotion movement-ecology package. Larval-biology notes that
+Tracking items for the TethysPath movement-ecology package. Larval-biology notes that
 used to live here have been archived to `docs/HISTORICAL_LARVAL_NOTES.md` (they belong
 to the ParticleTracking project).
 
 ## Phase 6 — Notebook migration (in progress)
-- [x] Move dashboard/Leaflet export logic into `notebooks/GeoMotionNotes.jl`; keep
+- [x] Move dashboard/Leaflet export logic into `notebooks/TethysPathNotes.jl`; keep
   `export_dashboards` as a no-op shim in `src/pipeline.jl`.
 - [x] Document the figure conventions (`FIGURE_CONVENTIONS.md`, "degrade loudly" rule).
-- [x] Migrate JLD2 checkpoints to the `GeoMotion` module name
+- [x] Migrate JLD2 checkpoints to the `TethysPath` module name
   (`scripts/migrate_checkpoint.jl`, run 2026-10-23).
 - [x] Delete `src/dashboards.jl` (superseded by the notebook; a byte-exact receipt
   copy is kept at `src/dashboards.jl.backup`, gitignored). The former placeholder

@@ -3,10 +3,10 @@
 # Scotian Shelf snow crab mark-recapture dataset, resharded to a 5 km hexagonal
 # lattice and restricted to the 25-350 m benthic habitat band.
 #
-#   julia --project=. GeoMotionRun.jl --config=configs/snowcrab.toml
+#   julia --project=. TethysPathRun.jl --config=configs/snowcrab.toml
 #
 # Every parameter specified here overrides the default declared in
-# `GeoMotionConfig`, and command-line flags override this file.
+# `TethysPathConfig`, and command-line flags override this file.
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -69,9 +69,9 @@ rest_advantage = 0.0
 rest_advantage_form = "difference"
 
 # -----------------------------------------------------------------------------
-# Habitat Suitability & GeoData Environmental Sources
+# Habitat Suitability & Tethys Environmental Sources
 # -----------------------------------------------------------------------------
-use_geodata_habitat = true           # Query real physical habitat via GeoData
+use_geodata_habitat = true           # Query real physical habitat via Tethys
 temperature_source = "glorys12v1"    # Copernicus Marine GLORYS12V1 (1/12 deg)
 temperature_month = 0                # 0 for dynamic seasonal sequence / 1-12 for fixed
 bathymetry_source = "etopo2022"      # Bathymetry elevation/depth source

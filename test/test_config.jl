@@ -2,14 +2,14 @@ include("test_fixtures.jl")
 
 @testset "Parameters, Configuration & CLI" begin
     p_def = movement_parameters_default()
-    @test p_def isa GeoMotionConfig
+    @test p_def isa TethysPathConfig
     @test p_def.tagging_file === nothing
     @test p_def.path_methods == [:astar]
     @test p_def.model_modes isa Vector{Symbol}
     @test p_def.diagnostics isa Vector{Symbol}
     @test p_def.land_source === :landmask
 
-    c = GeoMotionConfig(; tagging_file = "x.jld2", n_samples = 7)
+    c = TethysPathConfig(; tagging_file = "x.jld2", n_samples = 7)
     @test c.tagging_file == "x.jld2"
     @test c.n_samples == 7
     @test c.path_methods == [:astar]
@@ -66,17 +66,17 @@ include("test_fixtures.jl")
 
         out = joinpath(dir, "round.toml")
         save_config(from_file, out)
-        back = GeoMotionConfig(out)
-        bad = [f for f in fieldnames(GeoMotionConfig)
+        back = TethysPathConfig(out)
+        bad = [f for f in fieldnames(TethysPathConfig)
                if f !== :show_help && !isequal(getfield(from_file, f), getfield(back, f))]
         @test isempty(bad)
     end
 
-    @test effective_model_modes(c) == setdiff(c.model_modes, GeoMotion.survey_dependent_modes())
-    @test isempty(intersect(effective_model_modes(c), GeoMotion.survey_dependent_modes()))
+    @test effective_model_modes(c) == setdiff(c.model_modes, TethysPath.survey_dependent_modes())
+    @test isempty(intersect(effective_model_modes(c), TethysPath.survey_dependent_modes()))
 
-    @test_throws ArgumentError GeoMotion.apply_overrides(
-        GeoMotionConfig(), Dict{Symbol,Any}(:not_a_field => 1))
+    @test_throws ArgumentError TethysPath.apply_overrides(
+        TethysPathConfig(), Dict{Symbol,Any}(:not_a_field => 1))
 
     for bad_flag in ("--diagnostics=valdiation", "--model-modes=telmetry",
                 "--path-methods=astar,dijkstra")
@@ -87,7 +87,7 @@ include("test_fixtures.jl")
 
     s = create_argparse_settings()
     @test s isa ArgParse.ArgParseSettings
-    known = Set(fieldnames(GeoMotionConfig))
+    known = Set(fieldnames(TethysPathConfig))
     unbound = [f.dest_name for f in s.args_table.fields
                if f.dest_name != "config" && !(Symbol(f.dest_name) in known)]
     @test isempty(unbound)

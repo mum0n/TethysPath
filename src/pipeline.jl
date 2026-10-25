@@ -15,13 +15,13 @@ using DataFrames
 Raise a clear, actionable error when an R-backed code path is reached without
 `RCall` installed.
 
-R is an optional dependency. `GeoMotionRCallExt` is loaded automatically
+R is an optional dependency. `TethysPathRCallExt` is loaded automatically
 when `RCall` and a working R are both present; this stub only fires when they are
 not, and it names the specific input that needed them rather than surfacing an
 `UndefVarError` from deep inside a loader.
 """
 function _require_r_backend(what::AbstractString)
-    Base.get_extension(@__MODULE__, :GeoMotionRCallExt) === nothing && throw(
+    Base.get_extension(@__MODULE__, :TethysPathRCallExt) === nothing && throw(
         ArgumentError(
             "$what requires the optional `RCall` backend, which is not loaded. " *
             "Install it with `import Pkg; Pkg.add(\"RCall\")` and ensure an R " *
@@ -38,7 +38,7 @@ end
 
 Convert a tabular R file to an Arrow IPC file, in R.
 
-Implemented by `GeoMotionRCallExt`. This stub exists so the package loads
+Implemented by `TethysPathRCallExt`. This stub exists so the package loads
 without `RCall`.
 """
 function _r_ipc_convert(filepath::AbstractString, temp_ipc::AbstractString)
@@ -51,7 +51,7 @@ end
 
 Load an R object (`.rds` / `.RData`) for region-polygon extraction.
 
-Implemented by `GeoMotionRCallExt`. This stub exists so the package loads
+Implemented by `TethysPathRCallExt`. This stub exists so the package loads
 without `RCall`.
 """
 function _r_load_object(path::AbstractString)
@@ -97,7 +97,7 @@ function r_to_ipc(filepath::AbstractString)
     temp_ipc = tempname() * ".arrow"
     
     try
-        # The R conversion lives in GeoMotionRCallExt so that the package
+        # The R conversion lives in TethysPathRCallExt so that the package
         # loads without an R installation.
         _r_ipc_convert(filepath, temp_ipc)
 
@@ -261,7 +261,7 @@ end
 # =============================================================================
 
 """
-    movement_parameters_default() -> GeoMotionConfig
+    movement_parameters_default() -> TethysPathConfig
 
 The single canonical entry point for all analysis parameters.
 
@@ -272,7 +272,7 @@ declared in `src/config.jl`. A dataset is selected by its input files, not by a
 separate code path: pass `tagging_file` (and the HSI and spatial-unit files that
 accompany it) to analyse real data, and leave them unset for synthetic data.
 """
-movement_parameters_default() = GeoMotionConfig()
+movement_parameters_default() = TethysPathConfig()
 
 # =============================================================================
 # Private Helpers
@@ -802,7 +802,7 @@ function load_movement_data(params)::NamedTuple
     verbose = params.verbose
 
     verbose && println("=" ^ 72)
-    verbose && println("  GeoMotion Pipeline")
+    verbose && println("  TethysPath Pipeline")
     verbose && println("=" ^ 72)
 
     # -- 1a. Load or generate the dataset -----------------------------------
@@ -1020,7 +1020,7 @@ end
             data.mesh, fine_mesh; method = :area_weighted
         )
         hsi_fine = if params.use_geodata_habitat
-            verbose && println("  Evaluating real habitat suitability via GeoData...")
+            verbose && println("  Evaluating real habitat suitability via Tethys...")
             build_geodata_habitat_suitability(
                 fine_mesh.centroids_lonlat;
                 polygons = hasproperty(fine_mesh, :polygons_lonlat) ? fine_mesh.polygons_lonlat : nothing,
@@ -2848,7 +2848,7 @@ end
 # export_movement_summary_csv) and standalone SVG/HTML dashboard exporters
 # (export_movement_posterior_dashboard, export_movement_flow_dashboard,
 # export_movement_summary_dashboard) have been consolidated into src/movement.jl
-# and are exported by the core GeoMotion module.
+# and are exported by the core TethysPath module.
 
 
 """
@@ -2870,7 +2870,7 @@ function export_dashboards(
     agent_trajectories = nothing,
     agent_space_use = nothing
 )::Union{NamedTuple, Nothing}
-    # Dashboards (Leaflet/HTML) have been moved to notebooks/GeoMotionNotes.jl
+    # Dashboards (Leaflet/HTML) have been moved to notebooks/TethysPathNotes.jl
     # (IMPLEMENTATION_PLAN.md Phase 6). This is a no-op shim so existing call
     # sites do not break; it renders nothing and returns nothing.
     return nothing
@@ -3202,7 +3202,7 @@ end
 """
     run_movement_analysis(params = movement_parameters_default()) -> NamedTuple
 
-Executes the complete GeoMotion movement analysis pipeline. All six phases
+Executes the complete TethysPath movement analysis pipeline. All six phases
 are called in sequence:
 
 1. `load_movement_data`                 -- data ingestion & depth barriers

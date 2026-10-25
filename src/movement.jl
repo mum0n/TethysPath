@@ -2,7 +2,7 @@
     movement.jl
 
 Advection-Diffusion-Reaction (ADR) spatiotemporal movement, spatial telemetry,
-and particle trajectory simulation engine for the GeoMotion package.
+and particle trajectory simulation engine for the TethysPath package.
 
 Version: v1.0.0
 """
@@ -222,7 +222,7 @@ function generate_ADR_simulation_bundle(
     area_method::Symbol = :cvt,
     rng::Random.AbstractRNG = Random.GLOBAL_RNG
 )
-    # 1. Generate spatial partitioning using GeoMotion's partitioning engine
+    # 1. Generate spatial partitioning using TethysPath's partitioning engine
     s_x_init = rand(rng, 1000) .* domain_size
     s_y_init = rand(rng, 1000) .* domain_size
     
@@ -730,10 +730,10 @@ function plot_ad_ratio_distribution(advection_field::AbstractVector{<:Real},
     # line-for-line copy of it, which drifted; delegating means one place to fix.
     # The extension loads when `Plots` is present, so a clear error beats a
     # `UndefVarError` naming an internal the caller never wrote.
-    ext = Base.get_extension(GeoMotion, :GeoMotionPlottingExt)
+    ext = Base.get_extension(TethysPath, :TethysPathPlottingExt)
     ext === nothing && error(
         "plot_ad_ratio_distribution needs `Plots`. Add Plots to this environment " *
-        "and the GeoMotionPlottingExt extension supplies the figure.")
+        "and the TethysPathPlottingExt extension supplies the figure.")
     return ext._ad_ratio_histogram_via_plots(advection_field, diffusion_field)
 end
 
@@ -892,7 +892,7 @@ end
 """
     validate_telemetry(df::DataFrame) -> nothing
 
-Validates that a telemetry / mark-recapture DataFrame conforms to GeoMotion movement
+Validates that a telemetry / mark-recapture DataFrame conforms to TethysPath movement
 schema requirements and logical consistency constraints.
 
 # Validation Checks
@@ -4084,7 +4084,7 @@ end
 """
     predict_path(res::NamedTuple, release::Int, recapture::Int, k=nothing; kwargs...) -> Vector{Int}
 
-Extracts the group transition matrix and domain mesh from a fitted GeoMotion result
+Extracts the group transition matrix and domain mesh from a fitted TethysPath result
 NamedTuple and predicts the most probable movement trajectory between release and
 recapture nodes using goal-directed search (`:astar`) or dynamic programming (`:viterbi`).
 
@@ -4135,7 +4135,7 @@ end
 """
     predict_corridor(res::NamedTuple, release::Int, recapture::Int, k::Int; kwargs...) -> Matrix{Float64}
 
-Extracts the group transition matrix from a fitted GeoMotion result NamedTuple and
+Extracts the group transition matrix from a fitted TethysPath result NamedTuple and
 computes the space-time Markov bridge corridor matrix over ``k`` steps.
 
 # Arguments
@@ -6237,7 +6237,7 @@ function reconstruct_paths_bayesian_ensemble(
     # 0.3 / 0.1 / 1.0. The ensemble then reported spread driven only by HSI
     # variation while presenting it as posterior uncertainty.
     vel_draws, diff_draws, gam_draws =
-        GeoMotion.posterior_kernel_draws(active_chn)
+        TethysPath.posterior_kernel_draws(active_chn)
 
     chn_mat_v = reshape(vel_draws, :, 1)
     chn_mat_d = reshape(diff_draws, :, 1)
@@ -7053,7 +7053,7 @@ function export_movement_posterior_dashboard(
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>GeoMotion Movement Posterior Uncertainty Dashboard</title>
+  <title>TethysPath Movement Posterior Uncertainty Dashboard</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?\
 family=Outfit:wght@300;400;600;700&\
@@ -7432,7 +7432,7 @@ function export_movement_flow_dashboard(
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>GeoMotion Macro-Regional Stock Connectivity & Flow Diagram</title>
+  <title>TethysPath Macro-Regional Stock Connectivity & Flow Diagram</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
   <style>

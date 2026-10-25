@@ -43,7 +43,7 @@ The framework is organized into six cohesive phases:
    â–¼
 [Phase 6] Checkpoint & Notebook Dashboards
           - Full results checkpoint written: movement_results_checkpoint.jld2
-          - Interactive dashboards: notebooks/GeoMotionNotes.jl (Pluto)
+          - Interactive dashboards: notebooks/TethysPathNotes.jl (Pluto)
             - Posterior paths, corridor explorer, HSI overlays, circuit maps
             - CSV summaries written by the pipeline in Phase 4-5
 ```
@@ -263,7 +263,7 @@ and comparing `psi` against the kernel promoted to annual steps
 loud `DomainError` (not jointly identifiable), recorded via `_record_panel_skip`.
 Both new fields (`connectivity_assessment`, `recapture_separation`) are stored
 in `movement_results_checkpoint.jld2` and rendered by Panels 7-8 of
-`notebooks/GeoMotionNotes.jl` (including region/community/corridor Leaflet
+`notebooks/TethysPathNotes.jl` (including region/community/corridor Leaflet
 overlay maps).
 
 **Bayesian ensemble** (`--diagnostics=bayesian_ensemble`): MCMC ensemble path
@@ -276,7 +276,7 @@ Spectral graph wavelets were removed from the package.
 ### Phase 6: Results Checkpoint & Notebook Dashboards
 
 The interactive Leaflet/HTML dashboards were consolidated into
-`notebooks/GeoMotionNotes.jl`, which loads the full results checkpoint and
+`notebooks/TethysPathNotes.jl`, which loads the full results checkpoint and
 renders all panels (posterior paths, corridor explorer, HSI overlays, circuit
 current maps, validation summaries, plus the first-passage connectivity
 assessment with region/community/corridor overlay maps and the recapture
@@ -332,7 +332,7 @@ and coordinate-space assumptions).
 | `n_ensemble` | `Int` | `50` | Posterior draws for ensemble corridor propagation |
 | `hsi_se` | `Float64` | `0.08` | HSI observation standard error |
 | `propagate_hsi_error` | `Bool` | `true` | Propagate HSI uncertainty into corridors |
-| `render_html` | `Bool` | `false` | Export legacy Leaflet HTML dashboards (default off; dashboards live in `notebooks/GeoMotionNotes.jl`) |
+| `render_html` | `Bool` | `false` | Export legacy Leaflet HTML dashboards (default off; dashboards live in `notebooks/TethysPathNotes.jl`) |
 | `output_dir` | `String` | `"output"` | Output directory |
 | `resume_from_checkpoint` | `Bool` | `false` | Load `movement_checkpoint.jld2`, skip Phases 1â€“3 |
 | `figures_only` | `Bool` | `false` | Load `movement_results_checkpoint.jld2`, skip to Phase 6 |
@@ -348,23 +348,23 @@ and coordinate-space assumptions).
 
 ```powershell
 # Full run
-julia --project=. GeoMotionRun.jl --config=configs/snowcrab.toml
+julia --project=. TethysPathRun.jl --config=configs/snowcrab.toml
 
 # Skip MCMC â€” load movement_checkpoint.jld2, run Phases 4â€“6
-julia --project=. GeoMotionRun.jl --config=configs/snowcrab.toml --resume=true
+julia --project=. TethysPathRun.jl --config=configs/snowcrab.toml --resume=true
 
 # Regenerate legacy HTML dashboards only (requires prior successful run)
-julia --project=. GeoMotionRun.jl --config=configs/snowcrab.toml --figures-only=true
+julia --project=. TethysPathRun.jl --config=configs/snowcrab.toml --figures-only=true
 
-# Interactive figures: open notebooks/GeoMotionNotes.jl in Pluto
+# Interactive figures: open notebooks/TethysPathNotes.jl in Pluto
 # (default run writes only CSVs, static figures and checkpoints)
 
 # Tweak styling and regenerate
-julia --project=. GeoMotionRun.jl --config=configs/snowcrab.toml `
+julia --project=. TethysPathRun.jl --config=configs/snowcrab.toml `
     --figures-only=true --dark-mode=true --cmap=plasma
 
 # Write results checkpoint without rendering HTML
-julia --project=. GeoMotionRun.jl --config=configs/snowcrab.toml `
+julia --project=. TethysPathRun.jl --config=configs/snowcrab.toml `
     --resume=true --render-html=false
 ```
 
@@ -405,7 +405,7 @@ julia --project=. GeoMotionRun.jl --config=configs/snowcrab.toml `
 To bootstrap the full results checkpoint from an existing MCMC run:
 
 ```powershell
-julia --project=. GeoMotionRun.jl --config=configs/snowcrab.toml --resume=true
+julia --project=. TethysPathRun.jl --config=configs/snowcrab.toml --resume=true
 ```
 
 ---
@@ -415,7 +415,7 @@ julia --project=. GeoMotionRun.jl --config=configs/snowcrab.toml --resume=true
 ### Example 1: Basic Analysis
 
 ```julia
-using GeoMotion
+using TethysPath
 results = run_movement_analysis()
 println("Paths reconstructed: ", length(results.paths))
 ```
@@ -423,7 +423,7 @@ println("Paths reconstructed: ", length(results.paths))
 ### Example 2: Snow Crab with Validation
 
 ```julia
-using GeoMotion
+using TethysPath
 
 params = merge(movement_parameters_snowcrab(), (;
     depth_range  = (25.0, 400.0),
@@ -441,7 +441,7 @@ println("Brier score: ", pa.posterior_predictive.summary.brier_mean)
 ### Example 3: Regenerate Figures Only
 
 ```julia
-using GeoMotion
+using TethysPath
 
 params = merge(movement_parameters_snowcrab(), (;
     figures_only = true,
@@ -497,29 +497,29 @@ output/
 
 ## 9. Shared Lakehouse Configuration
 
-`GeoMotion` accesses environmental datasets (such as bathymetry and hydrography) and
-assimilated tracking inputs via the shared lakehouse managed by `GeoData`:
+`TethysPath` accesses environmental datasets (such as bathymetry and hydrography) and
+assimilated tracking inputs via the shared lakehouse managed by `Tethys`:
 
 ```julia
-using GeoData
-# Inspect the lakehouse directory for GeoMotion
-store_dir = GeoData.lakehouse_dir("GeoMotion")
+using Tethys
+# Inspect the lakehouse directory for TethysPath
+store_dir = Tethys.lakehouse_dir("TethysPath")
 
 # Persistently set the shared lakehouse root for the workspace
-GeoData.set_lakehouse_dir!("/path/to/shared/lakehouse")
+Tethys.set_lakehouse_dir!("/path/to/shared/lakehouse")
 ```
 
 The location resolution hierarchy is:
 * `ENV["MOVEMENT_STORE_ROOT"]` or `ENV["GEODATA_LAKEHOUSE"]`.
-* `LocalPreferences.toml` (`[GeoData] lakehouse_dir`).
+* `LocalPreferences.toml` (`[Tethys] lakehouse_dir`).
 * `~/.geodata/storage.toml` (`[storage] store_root`).
-* Proximity fallback (`projects/lakehouse/GeoMotion`).
+* Proximity fallback (`projects/lakehouse/TethysPath`).
 
 ---
 
 ## 10. Scientific References
 
-1. **GeoMotion**: Choi, J. (2025). *Bayesian Spatio-Temporal Models for
+1. **TethysPath**: Choi, J. (2025). *Bayesian Spatio-Temporal Models for
    Marine Ecology*.
 2. **Circuit Theory**: McRae, B. H. et al. (2008). Using circuit theory to model
    connectivity in ecology. *Ecology*, 89(10), 2712â€“2724.

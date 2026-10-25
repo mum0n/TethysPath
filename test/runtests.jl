@@ -1,5 +1,5 @@
 # ==============================================================================
-# GeoMotion Comprehensive Test Suite Orchestrator
+# TethysPath Comprehensive Test Suite Orchestrator
 # ==============================================================================
 
 import Pkg
@@ -82,7 +82,7 @@ end
 
 requested_segments = parse_requested_segments(ARGS)
 
-@testset "GeoMotion Comprehensive Suite" begin
+@testset "TethysPath Comprehensive Suite" begin
     for seg_key in requested_segments
         info = AVAILABLE_SEGMENTS[seg_key]
         println("\n" * "="^80)

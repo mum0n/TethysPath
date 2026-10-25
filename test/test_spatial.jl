@@ -121,15 +121,15 @@ include("test_fixtures.jl")
         keep[idx(i, 4)] = true
     end
 
-    out, n_link, n_unlinked = GeoMotion.reconnect_severed_components(keep, W, cents_grid)
+    out, n_link, n_unlinked = TethysPath.reconnect_severed_components(keep, W, cents_grid)
     @test n_link == 1
     @test n_unlinked == 0
     @test count(out) == 19
-    @test length(GeoMotion._connected_components(out, nbr)) == 1
+    @test length(TethysPath._connected_components(out, nbr)) == 1
 
     # Global land/sea mask
-    @test GeoMotion._basemap_grid_token(5.0) == "5"
-    @test GeoMotion._basemap_grid_token(10.0) == "10"
+    @test TethysPath._basemap_grid_token(5.0) == "5"
+    @test TethysPath._basemap_grid_token(10.0) == "10"
     m_mask = land_mask_from_global_mask([(-63.0, 45.5), (-60.0, 45.5)]; resolution = "l", grid_minutes = 5.0)
     @test m_mask[1]
     @test !m_mask[2]

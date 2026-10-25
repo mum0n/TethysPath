@@ -92,10 +92,10 @@ include("test_fixtures.jl")
 
         # heading_bin: NaN maps to bin 1 (documented: callers must resolve the
         # self-transition *before* binning), bins wrap and clamp in range.
-        @test GeoMotion.heading_bin(0.0, 4) == 1
-        @test GeoMotion.heading_bin(90.0, 4) == 2
-        @test GeoMotion.heading_bin(NaN, 4) == 1
-        @test GeoMotion.heading_bin(359.9999, 4) == 4
+        @test TethysPath.heading_bin(0.0, 4) == 1
+        @test TethysPath.heading_bin(90.0, 4) == 2
+        @test TethysPath.heading_bin(NaN, 4) == 1
+        @test TethysPath.heading_bin(359.9999, 4) == 4
     end
 
     # --------------------------------------------------------------------------
@@ -264,9 +264,9 @@ include("test_fixtures.jl")
     @testset "Notebook field-mapping contract" begin
         # Regression guard for the notebook's field mappings against the
         # checkpoint schema written by src/pipeline.jl. The textual contract
-        # entries must stay in lock-step with notebooks/GeoMotionNotes.jl;
+        # entries must stay in lock-step with notebooks/TethysPathNotes.jl;
         # the execution checks below run only when the checkpoint exists.
-        nb_path = joinpath(@__DIR__, "..", "notebooks", "GeoMotionNotes.jl")
+        nb_path = joinpath(@__DIR__, "..", "notebooks", "TethysPathNotes.jl")
         notebook_checks = [
             ("loaded.mesh.n_units", "mesh size read via loaded.mesh, not loaded"),
             ("count(!iszero,", "sparse/dense kernel active counting"),
@@ -274,7 +274,7 @@ include("test_fixtures.jl")
             ("bottleneck_mask", "domain bottleneck counting"),
             ("pinch_mask", "circuit pinch metrics"),
             ("posterior_predictive", "validation summary entry point"),
-            ("MovementAnalysis = GeoMotion", "legacy checkpoint load alias"),
+            ("MovementAnalysis = TethysPath", "legacy checkpoint load alias"),
         ]
         if isfile(nb_path)
             nb_text = read(nb_path, String)

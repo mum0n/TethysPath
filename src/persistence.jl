@@ -697,7 +697,7 @@ end
     )::Vector{Float64}
 
 Build a real habitat suitability vector for spatial mesh units by querying
-real physical depth and bottom temperature through `GeoData`. When `polygons`
+real physical depth and bottom temperature through `Tethys`. When `polygons`
 are provided, local spatial averages within each polygon boundary are computed
 for both depth and bottom temperature; otherwise centroid point estimates are used.
 
@@ -732,20 +732,20 @@ function build_geodata_habitat_suitability(
     n_units = length(centroids_lonlat)
     hsi = zeros(Float64, n_units)
 
-    # 1. Obtain bathymetric interpolator via GeoData.geoget
-    verbose && println("Loading GeoData bathymetry for HSI evaluation...")
-    bathy_ds = GeoData.geoget(
+    # 1. Obtain bathymetric interpolator via Tethys.geoget
+    verbose && println("Loading Tethys bathymetry for HSI evaluation...")
+    bathy_ds = Tethys.geoget(
         "erddap://ETOPO_2022_v1_15s";
         cache_dir = input_dir,
         bounds = (lon_range, lat_range),
         verbose = verbose
     )
-    bathy_itp = GeoData.get_bathymetry_interpolator(bathy_ds)
+    bathy_itp = Tethys.get_bathymetry_interpolator(bathy_ds)
 
     # 2. Obtain bottom temperature interpolator
     temp_src = Symbol(temperature_source)
-    verbose && println("Loading GeoData hydrographic temperature ($(temp_src))...")
-    hydro = GeoDataSources.fetch_boundary_hydrography_geodata(
+    verbose && println("Loading Tethys hydrographic temperature ($(temp_src))...")
+    hydro = Tethys.fetch_boundary_hydrography_geodata(
         temp_src;
         lon_range = lon_range,
         lat_range = lat_range,
@@ -865,15 +865,15 @@ function build_dynamic_geodata_hsi_series(
     n_times = length(months)
     hsi_series = zeros(Float64, n_units, n_times)
 
-    # 1. Bathymetric interpolator (static over time) via GeoData.geoget
-    verbose && println("Loading GeoData bathymetry for dynamic HSI series...")
-    bathy_ds = GeoData.geoget(
+    # 1. Bathymetric interpolator (static over time) via Tethys.geoget
+    verbose && println("Loading Tethys bathymetry for dynamic HSI series...")
+    bathy_ds = Tethys.geoget(
         "erddap://ETOPO_2022_v1_15s";
         cache_dir = input_dir,
         bounds = (lon_range, lat_range),
         verbose = verbose
     )
-    bathy_itp = GeoData.get_bathymetry_interpolator(bathy_ds)
+    bathy_itp = Tethys.get_bathymetry_interpolator(bathy_ds)
 
     has_polys = polygons !== nothing && length(polygons) == n_units
 
@@ -913,8 +913,8 @@ function build_dynamic_geodata_hsi_series(
     # 2. Iterate across seasonal cycle / time intervals
     temp_src = Symbol(temperature_source)
     for (t_idx, m) in enumerate(months)
-        verbose && println("Evaluating GeoData bottom temperature for month $(m)...")
-        hydro_m = GeoDataSources.fetch_boundary_hydrography_geodata(
+        verbose && println("Evaluating Tethys bottom temperature for month $(m)...")
+        hydro_m = Tethys.fetch_boundary_hydrography_geodata(
             temp_src;
             lon_range = lon_range,
             lat_range = lat_range,

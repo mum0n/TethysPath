@@ -45,7 +45,7 @@ include("test_fixtures.jl")
     # movement_alpha_rho
     for v in (0.05, 0.2, 0.5, 0.9)
         for d in (0.01, 0.1, 0.4, 1.0)
-            a, r = GeoMotion.movement_alpha_rho(v, d)
+            a, r = TethysPath.movement_alpha_rho(v, d)
             tot = v + d + 1e-6
             @test a ≈ clamp(v / tot, 0.0, 1.0)
             @test r ≈ clamp(1.0 / (1.0 + tot), 0.01, 0.95)
@@ -60,7 +60,7 @@ include("test_fixtures.jl")
         ParName("mu_gamma")     => fill(1.0, n_draws),
     ), n_draws)
 
-    v, d, g = GeoMotion.posterior_kernel_draws(c)
+    v, d, g = TethysPath.posterior_kernel_draws(c)
     @test v isa Vector{Float64} && length(v) == n_draws
     @test d isa Vector{Float64} && length(d) == n_draws
     @test g isa Vector{Float64} && length(g) == n_draws
@@ -84,7 +84,7 @@ include("test_fixtures.jl")
         for _ in 1:max(0, k)
             vec_k = P_T * vec_k
         end
-        naive[(r, k)] = GeoMotion._rel_probs(vec_k)
+        naive[(r, k)] = TethysPath._rel_probs(vec_k)
     end
 
     grouped = kstep_transition_cache(P_T, releases_k, ks_k)
@@ -97,7 +97,7 @@ include("test_fixtures.jl")
     cents = [(0.0, 0.0), (1.0, 0.0), (9.0, 0.0), (10.0, 0.0), (20.0, 0.0), (30.0, 0.0)]
     keep  = [true, false, false, true, true, false]
     obs = DataFrame(tagid = ["a", "b", "c"], release = [2, 3, 1], k = [4, 9, 729], recapture = [6, 5, 4])
-    n_rel, n_rec = GeoMotion._snap_pruned_endpoints!(obs, keep, cents)
+    n_rel, n_rec = TethysPath._snap_pruned_endpoints!(obs, keep, cents)
     @test (n_rel, n_rec) == (2, 1)
     @test obs.release == [1, 4, 1]
     @test obs.recapture == [5, 5, 4]
@@ -119,7 +119,7 @@ include("test_fixtures.jl")
         0.0 0.5 0.0 0.5;
         0.5 0.0 0.5 0.0;
     ])
-    p_exact = GeoMotion._exact_k_max_prob_path(P_ring, 1, 3, 2)
+    p_exact = TethysPath._exact_k_max_prob_path(P_ring, 1, 3, 2)
     @test p_exact == [1, 2, 3] || p_exact == [1, 4, 3]
 
     # Agent-based simulation

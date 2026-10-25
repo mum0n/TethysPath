@@ -759,7 +759,7 @@ function _as_ring(r)
 end
 
 function _read_rdata(path::AbstractString)
-    # Implemented by GeoMotionRCallExt; the base stub raises a clear error
+    # Implemented by TethysPathRCallExt; the base stub raises a clear error
     # when RCall is not installed.
     return _r_load_object(path)
 end
