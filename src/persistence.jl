@@ -61,7 +61,7 @@ using Statistics
 const _KM_PER_DEG_P = 111.32
 
 """
-    AdvantageForm
+    Habitat advantage forms
 
 How a unit's local habitat advantage over its neighbourhood is measured, and how
 that advantage enters the stay probability.
@@ -96,7 +96,6 @@ global `residence`), the logit shift is clamped, and the resulting probability i
 clamped as a final backstop. A ratio is therefore never formed against a zero or
 non-finite denominator.
 """
-const AdvantageForm = Symbol
 
 const _ADVANTAGE_FORMS = (
     :difference, :ratio, :log_ratio,
@@ -137,7 +136,7 @@ end
     local_hsi_advantage(hsi, W; form = :difference) -> Vector{Float64}
 
 Per-unit local habitat advantage over its own neighbourhood, for the requested
-`form` (see [`AdvantageForm`](@ref)).
+`form`, one of the supported symbols documented above.
 
 Zero advantage means "this unit is no better or worse than the options around it",
 which is the neutral point for every supported form. Where a form is undefined —
@@ -152,7 +151,7 @@ an arbitrary number.
 function local_hsi_advantage(
     hsi::AbstractVector{<:Real},
     W::AbstractMatrix;
-    form::AdvantageForm = :difference
+    form::Symbol = :difference
 )::Vector{Float64}
     form in _ADVANTAGE_FORMS || throw(ArgumentError(
         "Unsupported rest_advantage_form :$form; expected one of " *
@@ -181,12 +180,13 @@ function local_hsi_advantage(
     end
 
     eps_h = 1e-9
+    is_ratio_form = !(form === :difference || form === :exp_difference)
     out = zeros(Float64, S)
     for i in 1:S
         hi = h[i]
         b = bar[i]
-        if !isfinite(b) || b <= eps_h
-            # No usable neighbourhood: the ratio is undefined, so stay neutral.
+        if !isfinite(b) || (is_ratio_form && b <= eps_h)
+            # No usable neighbourhood (or zero denominator for ratio forms): stay neutral.
             out[i] = 0.0
             continue
         end
@@ -223,9 +223,14 @@ function residency_from_advantage(
     residence::Real,
     advantage::AbstractVector{<:Real},
     coupling::Real,
-    form::AdvantageForm
+    form::Symbol
 )::Vector{Float64}
-    rho0 = clamp(Float64(residence), 0.0, 0.999)
+    rho_raw = Float64(residence)
+    (isfinite(rho_raw) && 0.0 <= rho_raw < 1.0) || throw(DomainError(
+        residence,
+        "Baseline residence probability must lie in [0.0, 1.0), got $residence."
+    ))
+    rho0 = min(rho_raw, 0.999)
     beta = Float64(coupling)
     # Short-circuit: 0 * Inf is NaN, and a zero coupling must be an exact no-op.
     (beta == 0.0 || isempty(advantage)) && return fill(rho0, length(advantage))
@@ -234,7 +239,15 @@ function residency_from_advantage(
         "Unsupported rest_advantage_form :$form."
     ))
 
-    logit0 = log(rho0 / (1.0 - rho0))
+    is_exp = form === :exp_difference || form === :exp_ratio || form === :exp_log_ratio
+    if is_exp && rho0 <= 0.0
+        throw(DomainError(
+            residence,
+            "Exponential residency coupling (:$form) requires residence > 0, got $residence."
+        ))
+    end
+
+    logit0 = is_exp ? log(rho0 / (1.0 - rho0)) : 0.0
     out = Vector{Float64}(undef, length(advantage))
     for i in eachindex(advantage)
         a = Float64(advantage[i])
@@ -242,12 +255,13 @@ function residency_from_advantage(
             out[i] = rho0
             continue
         end
-        if form === :exp_difference || form === :exp_ratio || form === :exp_log_ratio
-            # Clamp the shift so logistic() cannot saturate to exactly 0 or 1.
+        if is_exp
+            # Bound the logit shift so logistic() cannot underflow/overflow to exact 0 or 1.
             shift = clamp(beta * a, -20.0, 20.0)
-            out[i] = clamp(1.0 / (1.0 + exp(-(logit0 + shift))), 0.0, 0.999)
+            out[i] = min(1.0 / (1.0 + exp(-(logit0 + shift))), 0.999)
         else
-            out[i] = clamp(rho0 + beta * a, 0.0, 0.999)
+            rho_i = rho0 + beta * a
+            out[i] = min(max(rho_i, 0.0), 0.999)
         end
     end
     return out
@@ -262,21 +276,7 @@ known marine region rather than read off a magnitude.
 """
 function coordinate_space_of(centroids)::Symbol
     isempty(centroids) && return :planar_km
-    xs = Float64[]
-    ys = Float64[]
-    for pt in centroids
-        length(pt) >= 2 || continue
-        push!(xs, Float64(pt[1]))
-        push!(ys, Float64(pt[2]))
-    end
-    (isempty(xs) || isempty(ys)) && return :planar_km
-    min_x, max_x = minimum(xs), maximum(xs)
-    min_y, max_y = minimum(ys), maximum(ys)
-    (min_y < -90.0 || max_y > 90.0 || min_x < -180.0 || max_x > 180.0) && return :planar_km
-    known = (min_x <= -20.0 && max_x <= -10.0 && min_y >= 30.0 && max_y <= 85.0) ||
-            (min_x >= 100.0 && max_x <= 180.0 && min_y >= -50.0 && max_y <= 70.0) ||
-            (min_x >= -180.0 && max_x <= -50.0 && min_y >= -60.0 && max_y <= 75.0)
-    return known ? :geographic : :planar_km
+    return _infer_coord_space(centroids) ? :geographic : :planar_km
 end
 
 """
@@ -732,9 +732,9 @@ function build_geodata_habitat_suitability(
     n_units = length(centroids_lonlat)
     hsi = zeros(Float64, n_units)
 
-    # 1. Obtain bathymetric interpolator via Tethys.geoget
+    # 1. Obtain bathymetric interpolator via Tethys.load_dataset
     verbose && println("Loading Tethys bathymetry for HSI evaluation...")
-    bathy_ds = Tethys.geoget(
+    bathy_ds = Tethys.load_dataset(
         "erddap://ETOPO_2022_v1_15s";
         cache_dir = input_dir,
         bounds = (lon_range, lat_range),
@@ -745,7 +745,7 @@ function build_geodata_habitat_suitability(
     # 2. Obtain bottom temperature interpolator
     temp_src = Symbol(temperature_source)
     verbose && println("Loading Tethys hydrographic temperature ($(temp_src))...")
-    hydro = Tethys.fetch_boundary_hydrography_geodata(
+    hydro = Tethys.fetch_boundary_hydrography(
         temp_src;
         lon_range = lon_range,
         lat_range = lat_range,
@@ -865,9 +865,9 @@ function build_dynamic_geodata_hsi_series(
     n_times = length(months)
     hsi_series = zeros(Float64, n_units, n_times)
 
-    # 1. Bathymetric interpolator (static over time) via Tethys.geoget
+    # 1. Bathymetric interpolator (static over time) via Tethys.load_dataset
     verbose && println("Loading Tethys bathymetry for dynamic HSI series...")
-    bathy_ds = Tethys.geoget(
+    bathy_ds = Tethys.load_dataset(
         "erddap://ETOPO_2022_v1_15s";
         cache_dir = input_dir,
         bounds = (lon_range, lat_range),
@@ -914,7 +914,7 @@ function build_dynamic_geodata_hsi_series(
     temp_src = Symbol(temperature_source)
     for (t_idx, m) in enumerate(months)
         verbose && println("Evaluating Tethys bottom temperature for month $(m)...")
-        hydro_m = Tethys.fetch_boundary_hydrography_geodata(
+        hydro_m = Tethys.fetch_boundary_hydrography(
             temp_src;
             lon_range = lon_range,
             lat_range = lat_range,

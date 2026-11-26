@@ -7,7 +7,7 @@ R was previously a hard dependency, which meant the package could not precompile
 or load on any machine without an R installation — even for analyses that read
 nothing but Arrow, CSV, GeoJSON, or shapefiles. It is now a weak dependency: this
 extension loads automatically when both `RCall` and a working R are present, and
-the base package raises a clear, actionable error when an `.rds`, `.rda`, or
+the base package raises an error naming the missing object when an `.rds`, `.rda`, or
 `.qs` input is encountered without it.
 
 The R packages `qs` and `arrow` must be installed in R for `r_to_ipc`; they are

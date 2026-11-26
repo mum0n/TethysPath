@@ -24,9 +24,10 @@ using Dates
 # nearest-centroid snapping; cross-package method extension requires an
 # explicit import.
 using Tethys.Partitioning:
+    assign_spatial_units,
     lonlat_to_xy_km,
     xy_km_to_lonlat,
-    build_hex_mesh_planar,
+    build_hex_mesh,
     get_polygon_area
 import Tethys.Partitioning: map_point_to_units
 
@@ -37,6 +38,14 @@ import Tethys.Partitioning: map_point_to_units
 # would clash on method overwrite.
 using CoordRefSystems
 using Unitful
+
+function _validate_unit_prob(x::Real, name::AbstractString)::Float64
+    v = Float64(x)
+    (isfinite(v) && 0.0 <= v <= 1.0) || throw(DomainError(
+        x, "$name must lie in [0.0, 1.0], got $x"
+    ))
+    return v
+end
 
 # --- Column Detection Utilities ---
 const STANDARD_SPATIAL_COORDINATE_PAIRS = [
@@ -85,7 +94,7 @@ is generic over the mesh's fields so that a mesh carrying, for example,
 consistently without this function needing to know each field by name.
 
 # Arguments
-- `mesh`: Partition NamedTuple, normally from `build_hex_mesh_planar` or a
+- `mesh`: Partition NamedTuple, normally from `build_hex_mesh` or a
   reshard.
 - `keep`: Boolean mask of length `n_units`; `true` means retain.
 
@@ -284,6 +293,16 @@ function _detect_time_column(
         end
     end
 
+    # Case-insensitive fallback
+    lower_map = Dict(lowercase(string(n)) => n for n in propertynames(df))
+    for t_cand in STANDARD_TEMPORAL_CANDIDATES
+        key = lowercase(string(t_cand))
+        haskey(lower_map, key) && return lower_map[key]
+    end
+    for extra in ("datetime", "datecollected", "datetime_utc")
+        haskey(lower_map, extra) && return lower_map[extra]
+    end
+
     if allow_nothing
         return nothing
     end
@@ -368,27 +387,6 @@ function _detect_spatial_unit_column(
 end
 
 # --- Coordinate Conversion Utilities ---
-const _HAS_COORDSYS = true
-
-"""
-    assign_spatial_units(s_x, s_y; area_method=:hexagonal, target_units=10, kwargs...)
-
-Partitions planar or geographic point coordinates into discrete areal units.
-"""
-function assign_spatial_units(
-    s_x::AbstractVector{<:Real}, s_y::AbstractVector{<:Real};
-    area_method::Symbol = :hexagonal, target_units::Union{Nothing, Integer} = 10,
-    exact_units::Bool = false, kwargs...
-)::NamedTuple
-    n_u = !isnothing(target_units) ? Int(target_units) : 10
-    dx = maximum(s_x) - minimum(s_x)
-    dy = maximum(s_y) - minimum(s_y)
-    domain_area = max(1.0, dx * dy)
-    unit_area = domain_area / n_u
-    r_km = sqrt(unit_area / (3.0 * sqrt(3.0) / 2.0))
-    mesh = build_hex_mesh_planar(s_x, s_y; radius_km = max(1.0, r_km))
-    return mesh
-end
 
 # --- Hexagonal Mesh & Point Mapping ---
 
@@ -410,7 +408,7 @@ whose centroids fall within any of the boundary polygons are included.
 - `datum`: Geographic datum (default: `WGS84Latest`).
 
 # Returns
-- NamedTuple with the same fields as `build_hex_mesh_planar`, but containing
+- NamedTuple with the same fields as `build_hex_mesh`, but containing
   only hexagons whose centroids are inside the boundary polygons.
 """
 function build_hex_mesh_clipped(
@@ -726,7 +724,7 @@ function load_open_bathymetry(;
         try
             bathy_file = joinpath("inputs", "bathymetry.zarr")
             bounds = ((min_lon, max_lon), (min_lat, max_lat))
-            bathy_ds = Tethys.geoget(
+            bathy_ds = Tethys.load_dataset(
                 "erddap://ETOPO_2022_v1_15s";
                 cache_dir = "inputs",
                 bounds = bounds,
@@ -742,7 +740,7 @@ function load_open_bathymetry(;
         end
     elseif source isa AbstractString && (endswith(lowercase(source), ".zarr") || endswith(lowercase(source), ".nc")) && ispath(source)
         try
-            bathy_ds = Tethys.geoload(source)
+            bathy_ds = Tethys.load_dataset(source)
             itp = Tethys.get_bathymetry_interpolator(bathy_ds)
             for j in 1:ny, i in 1:nx
                 elev[i, j] = itp(lons[i], lats[j])
@@ -871,7 +869,7 @@ function load_open_bathymetry(;
         end
     end
 
-    # Build regular grid polygon cells for seamless LibGEOS geometric resharding
+    # Build regular grid polygon cells for LibGEOS geometric resharding
     centroids = Tuple{Float64, Float64}[]
     polygons = Vector{Vector{Tuple{Float64, Float64}}}()
     depth_vec = Float64[]
@@ -1879,214 +1877,7 @@ function match_telemetry_closest_month_hsi(
 end
 
 
-"""
-    _interpolate_hsi(hsi_2d, years, s_idx, decimal_year; ref_doy=244.0)
-    -> Float64
+# HSI temporal interpolation and bundle loading (`build_monthly_hsi_matrix`, `load_hsi_jld2`)
+# are imported from TethysBio.
 
-Linear interpolation of the annual posterior-mean HSI for spatial unit `s_idx`
-at continuous time `decimal_year`.
-
-The annual predictions are anchored at `ref_doy` (day of year; 244 ≈ Sept 1):
-
-    t_ref = (ref_doy − 1) / 365.25
-    u     = decimal_year − t_ref
-    y1    = clamp(⌊u⌋, y_min, y_max − 1)
-    α     = u − y1                          ∈ [0, 1)
-    HSI   = (1 − α) HSI(s, y1) + α HSI(s, y1+1)
-
-# Arguments
-- `hsi_2d`: Posterior-mean HSI matrix (S × T).
-- `years`: Annual year labels (e.g. 1999:2025).
-- `s_idx`: Spatial unit index (1-based).
-- `decimal_year`: Continuous time in decimal years.
-- `ref_doy`: Reference survey day of year (default 244.0).
-
-# Returns
-- `Float64`: Interpolated HSI clamped to [0, 1].
-"""
-function _interpolate_hsi(
-    hsi_2d::AbstractMatrix{Float64},
-    years::AbstractVector{<:Integer},
-    s_idx::Integer,
-    decimal_year::Real;
-    ref_doy::Real = 244.0
-)::Float64
-    y_min = first(years)
-    y_max = last(years)
-    t_off = (ref_doy - 1.0) / 365.25
-    u     = Float64(decimal_year) - t_off
-    u_cl  = clamp(u, Float64(y_min), Float64(y_max))
-    y1    = clamp(floor(Int, u_cl), y_min, y_max - 1)
-    α     = u_cl - Float64(y1)
-    t1    = clamp(y1 - y_min + 1, 1, length(years))
-    t2    = clamp(t1 + 1, 1, length(years))
-    return clamp((1.0 - α) * hsi_2d[s_idx, t1] + α * hsi_2d[s_idx, t2], 0.0, 1.0)
-end
-
-
-"""
-    build_monthly_hsi_matrix(
-        hsi_mean::AbstractMatrix{Float64},
-        years::AbstractVector{<:Integer};
-        ref_doy::Real = 244.0
-    ) -> Tuple{Matrix{Float64}, Dict{Tuple{Int, Int}, Int}}
-
-Discretizes multi-year spatial Habitat Suitability Index (HSI) surfaces onto a
-regular monthly grid (12 calendar months per survey year) via continuous
-piecewise-linear temporal interpolation, evaluating each cell at mid-month (day 15)
-with leap-year awareness.
-
-# Mathematical Formulation
-Given annual HSI values ``h_s(y)`` for spatial unit ``s`` in year ``y``, the fractional
-calendar year at day-of-year ``d`` of year ``y`` is:
-```math
-t = y + \\frac{d - 1}{D(y)}
-```
-where ``D(y) \\in \\{365, 366\\}``. Anchored to annual survey reference day
-``d_{\\text{ref}}``, the mid-month HSI is linearly interpolated between adjacent survey epochs:
-```math
-h_s(t) = (1 - \\alpha) h_s(y_1) + \\alpha h_s(y_2)
-```
-clamped to ``[0, 1]``.
-
-# Arguments
-- `hsi_mean`: Spatial HSI posterior mean matrix (size ``S \\times T_{\\text{years}}``).
-- `years`: Integer vector of survey years of length ``T_{\\text{years}}``.
-- `ref_doy`: Reference survey day of year (default `244.0` = September 1).
-
-# Returns
-- `Tuple{Matrix{Float64}, Dict{Tuple{Int, Int}, Int}}`:
-  - `mat`: Monthly discretized HSI matrix (size ``S \\times 12 T_{\\text{years}}``).
-  - `lookup`: Dictionary mapping `(year, month)` tuples to matrix column indices.
-"""
-function build_monthly_hsi_matrix(
-    hsi_mean::AbstractMatrix{Float64},
-    years::AbstractVector{<:Integer};
-    ref_doy::Real = 244.0
-)::Tuple{Matrix{Float64}, Dict{Tuple{Int, Int}, Int}}
-
-    S      = size(hsi_mean, 1)
-    n_cols = length(years) * 12
-    
-    # Use undef since we overwrite every element (avoids zeroing overhead)
-    mat    = Matrix{Float64}(undef, S, n_cols)
-    
-    # Pre-size the dictionary to avoid reallocations
-    lookup = Dict{Tuple{Int, Int}, Int}()
-    sizehint!(lookup, n_cols)
-    
-    col = 1
-    for yr in years
-        days_in_yr = Dates.isleapyear(yr) ? 366.0 : 365.0
-        for m in 1:12
-            doy_mid = Float64(Dates.dayofyear(Date(yr, m, 15)))
-            dec_yr  = Float64(yr) + (doy_mid - 1.0) / days_in_yr
-            
-            # @inbounds safely removes bounds checking for peak speed
-            @inbounds for s in 1:S
-                mat[s, col] = _interpolate_hsi(
-                    hsi_mean, years, s, dec_yr; ref_doy=ref_doy)
-            end
-            
-            lookup[(yr, m)] = col
-            col += 1
-        end
-    end
-    
-    return mat, lookup
-end
-
-
-"""
-    load_hsi_jld2(path; hsi_key="hsi", years_key="years",
-                  auids_key="auids", ref_doy=244.0) -> NamedTuple
-
-Load a JLD2 bundle containing a 3D posterior HSI array and compute derived
-summaries needed for movement modelling.
-
-# Expected JLD2 keys
-- `hsi`:   Array{Float64, 3} (S × T × N_draws).
-- `years`: Vector{Int} of length T.
-- `auids`: (optional) spatial unit identifiers.
-
-# Arguments
-- `path`: Path to the JLD2 file.
-- `hsi_key`, `years_key`, `auids_key`: JLD2 key names.
-- `ref_doy`: Reference day of year (default 244.0 = Sept 1).
-
-# Returns
-`NamedTuple`:
-- `hsi`, `years`, `auids`.
-- `hsi_mean` (S × T): posterior mean.
-- `hsi_sd` (S × T): posterior standard deviation.
-- `hsi_spatial_mean` (length S): multi-year mean per spatial unit.
-- `monthly_hsi` (S × 12T): monthly discretization.
-- `month_lookup`: Dict{(year, month) => column_index}.
-"""
-function load_hsi_jld2(
-    path::AbstractString;
-    hsi_key::AbstractString   = "hsi",
-    years_key::AbstractString = "years",
-    auids_key::AbstractString = "auids",
-    ref_doy::Real             = 244.0
-)::NamedTuple
-    isfile(path) || error("HSI JLD2 not found: $(path)")
-    bundle = JLD2.load(path)
-    actual_hsi_key = if haskey(bundle, hsi_key)
-        hsi_key
-    elseif haskey(bundle, "sims")
-        "sims"
-    elseif haskey(bundle, "predictions")
-        "predictions"
-    else
-        hsi_key
-    end
-    hsi    = bundle[actual_hsi_key]
-    years  = bundle[years_key]
-    auids  = haskey(bundle, auids_key) ? bundle[auids_key] : collect(1:size(hsi, 1))
-
-    hsi_mean          = dropdims(mean(hsi, dims=3), dims=3)
-    hsi_sd            = dropdims(std(hsi, dims=3),  dims=3)
-    hsi_spatial_mean  = vec(mean(hsi_mean, dims=2))
-
-    monthly_hsi, month_lookup = build_monthly_hsi_matrix(
-        Float64.(hsi_mean), years; ref_doy=ref_doy)
-
-    return (
-        hsi              = hsi,
-        years            = years,
-        auids            = auids,
-        hsi_mean         = hsi_mean,
-        hsi_sd           = hsi_sd,
-        hsi_spatial_mean = hsi_spatial_mean,
-        monthly_hsi      = monthly_hsi,
-        month_lookup     = month_lookup
-    )
-end
-
-"""
-    polygons_intersect(poly1::Vector{Tuple{Float64, Float64}}, poly2::Vector{Tuple{Float64, Float64}}) -> Bool
-
-Check if two polygons intersect using LibGEOS. Returns true if they intersect
-or touch, false otherwise. Handles invalid/empty polygons gracefully.
-"""
-function polygons_intersect(
-    poly1::Vector{Tuple{Float64, Float64}},
-    poly2::Vector{Tuple{Float64, Float64}}
-)::Bool
-    length(poly1) < 3 && return false
-    length(poly2) < 3 && return false
-    try
-        lg_p1 = LibGEOS.Polygon([[[Float64(pt[1]), Float64(pt[2])] for pt in poly1]])
-        lg_p2 = LibGEOS.Polygon([[[Float64(pt[1]), Float64(pt[2])] for pt in poly2]])
-        if !LibGEOS.isValid(lg_p1)
-            lg_p1 = LibGEOS.buffer(lg_p1, 0.0)
-        end
-        if !LibGEOS.isValid(lg_p2)
-            lg_p2 = LibGEOS.buffer(lg_p2, 0.0)
-        end
-        return LibGEOS.intersects(lg_p1, lg_p2)
-    catch
-        return false
-    end
-end
+# `polygons_intersect` is imported from Tethys.

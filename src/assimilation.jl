@@ -21,7 +21,7 @@
 #      manifest.toml   what was assimilated, from where, and from which bytes
 #
 #  Arrow for the tables and Zarr for the array, because those are what Tethys's own
-#  backends read: `geoload` on the array, `Arrow.Table` on the tables. Nothing here
+#  backends read: `load_dataset` on the array, `Arrow.Table` on the tables. Nothing here
 #  interprets the science -- it moves bytes, records where they came from, and refuses
 #  to overwrite a newer artefact.
 #
@@ -49,12 +49,14 @@ the other halves' stores, so the lakehouse layout is one directory per package.
 
 The default is a path relative to this file Ã¢â‚¬â€ `src/` is two levels below the workspace root,
 where the lakehouse sits beside each package Ã¢â‚¬â€ so it resolves the same way whether the package
-is loaded from the working tree or from Pluto. `MOVEMENT_STORE_ROOT` overrides it for a machine
+is loaded from the working tree or an external script. `MOVEMENT_STORE_ROOT` overrides it for a machine
 with the lakehouse somewhere else.
 """
 function movement_store_root()::String
-    override = get(ENV, "MOVEMENT_STORE_ROOT", "")
-    isempty(override) || return abspath(override)
+    override = get(ENV, "TETHYS_LAKEHOUSE", get(ENV, "MOVEMENT_STORE_ROOT", get(ENV, "GEODATA_LAKEHOUSE", "")))
+    if !isempty(override)
+        return isdir(joinpath(override, "TethysPath")) ? abspath(joinpath(override, "TethysPath")) : abspath(override)
+    end
     return Tethys.lakehouse_dir("TethysPath")
 end
 
@@ -69,7 +71,7 @@ the reader to spend the time.
 """
 function movement_store_status(;
     store_dir::AbstractString = movement_store_root(),
-    input_dir::AbstractString = "data",
+    input_dir::AbstractString = "inputs",
     tagging_file::Union{Nothing, AbstractString} = nothing,
     hsi_file::Union{Nothing, AbstractString} = nothing,
     sppoly_file::Union{Nothing, AbstractString} = nothing
@@ -108,10 +110,10 @@ Three conversions, one per input:
 | input | artefact | what moves |
 |---|---|---|
 | `tagging.jld2` (a `DataFrame`) | `tagging.arrow` | the event table, one row per observation |
-| `hsi.jld2` (`sims`, `years`, `auids`) | `hsi.zarr` | the suitability series as a `GeoDataset` |
+| `hsi.jld2` (`sims`, `years`, `auids`) | `hsi.zarr` | the suitability series as a `TethysDataset` |
 | `sppoly.jld2` (a `DataFrame`) | `sppoly.arrow` | the unit table |
 
-The array is written through `geosave` with declared dimensions rather than as a blob, so
+The array is written through `save_dataset` with declared dimensions rather than as a blob, so
 a reader can ask for `unit 207` or `month 3` without knowing how the array was laid out.
 The tables go to Arrow, which handles `PooledArray`/`InlineString` columns that a naive
 write would rebuild wrongly Ã¢â‚¬â€ the reason an earlier attempt to read `sppoly.jld2` outside
@@ -123,7 +125,7 @@ need a dependency the pinned stack cannot take, and mtime is what the skip test 
 against, so the manifest records the same thing the test uses.
 """
 function assimilate_movement_inputs(;
-    input_dir::AbstractString = "data",
+    input_dir::AbstractString = "inputs",
     store_dir::AbstractString = movement_store_root(),
     tagging_file::Union{Nothing, AbstractString} = nothing,
     hsi_file::Union{Nothing, AbstractString} = nothing,
@@ -209,7 +211,7 @@ convention `load_movement_dataset` uses Ã¢â‚¬â€ an explicit path wins
 what a run reads and what assimilation converts cannot drift apart.
 """
 function _movement_input_specs(;
-    input_dir::AbstractString = "data",
+    input_dir::AbstractString = "inputs",
     tagging_file::Union{Nothing, AbstractString} = nothing,
     hsi_file::Union{Nothing, AbstractString} = nothing,
     sppoly_file::Union{Nothing, AbstractString} = nothing
@@ -310,7 +312,7 @@ end
 """
     _assimilate_hsi(source, target)
 
-The suitability series, moved to a `GeoDataset`.
+The suitability series, moved to a `TethysDataset`.
 
 The array is `(units x months x draws)` Ã¢â‚¬â€ 707 spatial units, 27 monthly steps, 5000 draws Ã¢â‚¬â€
 so the dimensions are spatial, temporal and ensemble. `auids` are the unit identities and
@@ -327,8 +329,8 @@ function _assimilate_hsi(source::AbstractString, target::AbstractString; verbose
                   "$(source) holds none of sims/hsi/predictions; it holds " *
                   "$(sort(collect(keys(bundle)))).")
     sims = bundle[hsi_key]
-    years = something(getkey(bundle, "years"), collect(1:size(sims, 2)))
-    auids = something(getkey(bundle, "auids"), collect(1:size(sims, 1)))
+    years = something(_get_or_nothing(bundle, "years"), collect(1:size(sims, 2)))
+    auids = something(_get_or_nothing(bundle, "auids"), collect(1:size(sims, 1)))
     length(auids) == size(sims, 1) || error(
         "$(source) has $(length(auids)) unit ids for $(size(sims, 1)) units.")
     length(years) == size(sims, 2) || error(
@@ -340,14 +342,14 @@ function _assimilate_hsi(source::AbstractString, target::AbstractString; verbose
     d_month = _dim(:month, collect(1.0:nm), "1", "monthly step index", Tethys.DIM_TEMPORAL)
     d_draw = _dim(:draw, collect(1.0:nd), "1", "posterior draw", Tethys.DIM_PARAMETRIC)
 
-    ds = GeoDataset(
-        Dict{String, GeoArray}("sims" => GeoArray(Array{Float64}(sims),
+    ds = TethysDataset(
+        Dict{String, TethysArray}("sims" => TethysArray(Array{Float64}(sims),
                                                   (d_unit, d_month, d_draw), crs,
                                                   Dict{String, Any}())),
-        Dict{Symbol, GeoArray}(
-            :auids => GeoArray(collect(Float64, auids), (d_unit,), crs, Dict{String, Any}()),
-            :month => GeoArray(collect(1.0:nm), (d_month,), crs, Dict{String, Any}()),
-            :draw => GeoArray(collect(1.0:nd), (d_draw,), crs, Dict{String, Any}())),
+        Dict{Symbol, TethysArray}(
+            :auids => TethysArray(collect(Float64, auids), (d_unit,), crs, Dict{String, Any}()),
+            :month => TethysArray(collect(1.0:nm), (d_month,), crs, Dict{String, Any}()),
+            :draw => TethysArray(collect(1.0:nd), (d_draw,), crs, Dict{String, Any}())),
         Dict{Symbol, Tethys.Dimension}(:unit => d_unit, :month => d_month, :draw => d_draw),
         crs,
         Dict{String, Any}(
@@ -357,7 +359,7 @@ function _assimilate_hsi(source::AbstractString, target::AbstractString; verbose
             "title" => "Assimilated habitat suitability series"),
         Tethys.ZarrBackend(), target)
 
-    Tethys.geosave(target, ds; backend = :zarr, overwrite = true)
+    Tethys.save_dataset(target, ds; backend = :zarr, overwrite = true)
     verbose && println("    sims$(size(sims)) + $(length(years)) years, " *
                        "$(length(auids)) units -> $(basename(target))")
     return target
@@ -367,16 +369,16 @@ _dim(name, coords, units, standard_name, dim_type) = Tethys.Dimension(
     name = name, size = length(coords), coords = coords,
     units = units, standard_name = standard_name, dim_type = dim_type)
 
-getkey(d, k) = haskey(d, k) ? d[k] : nothing
+_get_or_nothing(d, k) = haskey(d, k) ? d[k] : nothing
 
 """
     read_assimilated_movement_inputs(; store_dir = movement_store_root())
 
-The assimilated store, read back through Tethys: the `GeoDataset` for the array and
+The assimilated store, read back through Tethys: the `TethysDataset` for the array and
 `Arrow.Table` for the tables.
 
 The HSI dataset is self-describing — the store records the dimensions it was written with, so
-`geoload` returns `:unit` (DIM_SPATIAL), `:month` (DIM_TEMPORAL) and `:draw`
+`load_dataset` returns `:unit` (DIM_SPATIAL), `:month` (DIM_TEMPORAL) and `:draw`
 (DIM_PARAMETRIC) with their coordinate arrays attached, rather than handing back three
 unnamed axes and letting the reader guess which is the spatial one.
 
@@ -397,7 +399,7 @@ function read_assimilated_movement_inputs(;
         (isdir(path) || isfile(path)) || error(
             "The store at $(store_dir) has no $(name). Run `assimilate_movement_inputs()`.")
     end
-    hsi = Tethys.geoload(hsi_path; backend = :zarr)
+    hsi = Tethys.load_dataset(hsi_path; backend = :zarr)
     auids = haskey(hsi.coords, :unit) ? collect(Int, hsi.coords[:unit].data) : Int[]
     return (
         hsi = hsi,
@@ -422,4 +424,226 @@ closed and nothing refers to it.
 function _read_arrow(path::AbstractString)
     isfile(path) || error("The Arrow table at $(path) is missing.")
     return DataFrame(Arrow.Table(IOBuffer(read(path))))
+end
+
+# -----------------------------------------------------------------------------
+#  TethysBio movement parameterization statistics
+# -----------------------------------------------------------------------------
+
+"""
+    _mean_neighbor_step_km(loaded::NamedTuple) -> Float64
+
+Compute the mean spatial step length (km) across active off-diagonal edges of `loaded.W`.
+"""
+function _mean_neighbor_step_km(loaded::NamedTuple)::Float64
+    hasproperty(loaded, :W) && hasproperty(loaded, :mesh) || return 0.0
+    W = sparse(loaded.W)
+    mesh = loaded.mesh
+    use_km = hasproperty(mesh, :centroids_km) && !isempty(mesh.centroids_km)
+    cents = use_km ? mesh.centroids_km :
+            (hasproperty(mesh, :centroids_lonlat) ? mesh.centroids_lonlat :
+             (hasproperty(mesh, :centroids) ? mesh.centroids : nothing))
+    cents === nothing && return 0.0
+    is_geo = !use_km && _infer_coord_space(cents)
+    land = hasproperty(loaded, :land_mask) ? loaded.land_mask : nothing
+
+    rows = rowvals(W)
+    n = size(W, 1)
+    total_d = 0.0
+    n_edges = 0
+    for j in 1:n
+        (!isnothing(land) && land[j]) && continue
+        cj = cents[j]
+        for ptr in nzrange(W, j)
+            i = rows[ptr]
+            i >= j && continue
+            (!isnothing(land) && land[i]) && continue
+            ci = cents[i]
+            d = is_geo ?
+                haversine_distance(Float64(ci[1]), Float64(ci[2]),
+                                   Float64(cj[1]), Float64(cj[2])) / 1000.0 :
+                hypot(Float64(cj[1]) - Float64(ci[1]),
+                      Float64(cj[2]) - Float64(ci[2]))
+            if isfinite(d) && d > 0.0
+                total_d += d
+                n_edges += 1
+            end
+        end
+    end
+    return n_edges > 0 ? total_d / n_edges : 0.0
+end
+
+"""
+    compute_tethysbio_movement_stats(
+        loaded::NamedTuple,
+        kernels::NamedTuple,
+        path_res::Union{Nothing, NamedTuple} = nothing;
+        step_years::Real = 1.0 / 12.0,
+        species::AbstractString = "SnowCrab",
+        speed_quantile::Real = 0.95,
+        directed_alpha_threshold::Real = 0.05
+    ) -> NamedTuple
+
+Derive movement summary statistics and `TethysBio`-compatible movement parameters from
+fitted `TethysPath` outputs.
+
+# Mathematical Formulation
+Let ``\\alpha \\in [0, 1]`` be the fitted advection weight, ``\\rho \\in [0, 1)`` the
+per-step residence probability, ``\\gamma`` the habitat-gradient responsiveness,
+``\\Delta t_{\\text{step}}`` the kernel step duration (years), and ``\\bar{d}_{\\text{step}}``
+the mean neighbor step length (km).
+
+- **Effective annual speed (km/yr)**:
+  ``v_{\\text{eff}} = (1 - \\rho)\\,\\bar{d}_{\\text{step}} / \\Delta t_{\\text{step}}``.
+- **2D isotropic diffusivity (km²/yr)**:
+  ``D_{\\text{eff}} = (1 - \\rho)(1 - \\alpha)\\,\\bar{d}_{\\text{step}}^2 / (4\\,\\Delta t_{\\text{step}})``.
+- **Annual movement bound (`max_move_m_per_year`)**:
+  ``1000 \\cdot Q_{p}(v_{\\text{path}})`` (m/yr) when reconstructed path speeds are
+  available, falling back to ``1000 \\cdot v_{\\text{eff}}`` otherwise.
+- **Softmax temperature (`movement_softmax_temperature`)**:
+  ``\\tau = 1 / \\gamma`` for ``\\gamma > 0``, matching `TethysBio`'s ``\\exp(u / \\tau)``
+  heading weights against `TethysPath`'s ``\\exp(\\gamma \\Delta h)`` taxis weights.
+"""
+function compute_tethysbio_movement_stats(
+    loaded::NamedTuple,
+    kernels::NamedTuple,
+    path_res::Union{Nothing, NamedTuple} = nothing;
+    step_years::Real = 1.0 / 12.0,
+    species::AbstractString = "SnowCrab",
+    speed_quantile::Real = 0.95,
+    directed_alpha_threshold::Real = 0.05
+)::NamedTuple
+    dt_yr = Float64(step_years)
+    (isfinite(dt_yr) && dt_yr > 0.0) || throw(DomainError(
+        step_years, "step_years must be positive and finite"
+    ))
+    sq = Float64(speed_quantile)
+    (isfinite(sq) && 0.0 < sq <= 1.0) || throw(DomainError(
+        speed_quantile, "speed_quantile must lie in (0, 1]"
+    ))
+
+    alpha = Float64(mean(kernels.alpha_hat))
+    rho   = Float64(mean(kernels.rho_hat))
+    gamma = Float64(mean(kernels.gamma_hat))
+    (0.0 <= alpha <= 1.0) || throw(DomainError(alpha, "alpha_hat must lie in [0, 1]"))
+    (0.0 <= rho < 1.0)    || throw(DomainError(rho,   "rho_hat must lie in [0, 1)"))
+    isfinite(gamma)       || throw(DomainError(gamma, "gamma_hat must be finite"))
+
+    mean_step_km = _mean_neighbor_step_km(loaded)
+    eff_speed_km_yr = (1.0 - rho) * mean_step_km / dt_yr
+    eff_diff_km2_yr = (1.0 - rho) * (1.0 - alpha) * (mean_step_km^2) / (4.0 * dt_yr)
+
+    # Path-derived empirical statistics when reconstructed paths are provided
+    paths_rich = (!isnothing(path_res) && hasproperty(path_res, :paths) &&
+                  !isempty(path_res.paths)) ?
+        _build_paths_rich(path_res, loaded; step_years = dt_yr) : NamedTuple[]
+    path_stats = !isempty(paths_rich) ?
+        compute_movement_statistics(paths_rich, path_res, loaded) : nothing
+
+    speeds = !isempty(paths_rich) ?
+        filter(v -> isfinite(v) && v >= 0.0, Float64[p.speed_km_per_year for p in paths_rich]) :
+        Float64[]
+    disps = (!isnothing(path_stats) && hasproperty(path_stats, :net_displacement_km)) ?
+        filter(v -> isfinite(v) && v >= 0.0, Float64.(path_stats.net_displacement_km)) :
+        Float64[]
+
+    has_paths = !isempty(speeds)
+    mean_spd   = has_paths ? mean(speeds) : eff_speed_km_yr
+    median_spd = has_paths ? median(speeds) : eff_speed_km_yr
+    q_spd      = has_paths ? quantile(speeds, sq) : eff_speed_km_yr
+    max_spd    = has_paths ? maximum(speeds) : eff_speed_km_yr
+
+    has_disps = !isempty(disps)
+    mean_disp   = has_disps ? mean(disps) : (1.0 - rho) * mean_step_km
+    median_disp = has_disps ? median(disps) : (1.0 - rho) * mean_step_km
+    q_disp      = has_disps ? quantile(disps, sq) : (1.0 - rho) * mean_step_km
+
+    rayleigh_r = (!isnothing(path_stats) && hasproperty(path_stats, :directional_bias)) ?
+        Float64(path_stats.directional_bias.mean_vector_length) : 0.0
+
+    use_directed = (alpha > Float64(directed_alpha_threshold)) && (gamma > 0.0)
+    softmax_temp = gamma > 0.0 ? (1.0 / gamma) : nothing
+    max_move_m_yr = 1000.0 * q_spd
+
+    return (
+        species = String(species),
+        step_years = dt_yr,
+        kernel_parameters = (
+            alpha = alpha,
+            rho = rho,
+            gamma = gamma,
+        ),
+        movement_statistics = (
+            n_paths = has_paths ? length(speeds) : 0,
+            mean_step_km = mean_step_km,
+            effective_speed_km_per_year = eff_speed_km_yr,
+            effective_diffusivity_km2_per_year = eff_diff_km2_yr,
+            mean_speed_km_per_year = mean_spd,
+            median_speed_km_per_year = median_spd,
+            quantile_speed_km_per_year = q_spd,
+            speed_quantile = sq,
+            max_speed_km_per_year = max_spd,
+            mean_displacement_km = mean_disp,
+            median_displacement_km = median_disp,
+            quantile_displacement_km = q_disp,
+            rayleigh_r = rayleigh_r,
+        ),
+        tethysbio_parameters = (
+            max_move_m_per_year = max_move_m_yr,
+            movement_softmax_temperature = softmax_temp,
+            use_directed_movement = use_directed,
+        ),
+    )
+end
+
+"""
+    write_tethysbio_movement_stats(
+        stats::NamedTuple;
+        store_dir::AbstractString = movement_store_root(),
+        filename::AbstractString = "movement_stats.toml"
+    ) -> String
+
+Persist `compute_tethysbio_movement_stats` output into the `TethysPath` lakehouse store
+as a self-describing TOML artifact so `TethysBio` can assimilate movement parameters
+when the store is present.
+"""
+function write_tethysbio_movement_stats(
+    stats::NamedTuple;
+    store_dir::AbstractString = movement_store_root(),
+    filename::AbstractString = "movement_stats.toml"
+)::String
+    mkpath(store_dir)
+    out_path = joinpath(store_dir, filename)
+
+    tb = Dict{String, Any}(
+        "max_move_m_per_year" => Float64(stats.tethysbio_parameters.max_move_m_per_year),
+        "use_directed_movement" => Bool(stats.tethysbio_parameters.use_directed_movement),
+    )
+    if !isnothing(stats.tethysbio_parameters.movement_softmax_temperature)
+        tb["movement_softmax_temperature"] = Float64(
+            stats.tethysbio_parameters.movement_softmax_temperature
+        )
+    end
+
+    payload = Dict{String, Any}(
+        "schema_version" => 1,
+        "producer" => "TethysPath",
+        "generated_utc" => string(now(Dates.UTC)),
+        "species" => String(stats.species),
+        "step_years" => Float64(stats.step_years),
+        "kernel_parameters" => Dict{String, Any}(
+            "alpha" => Float64(stats.kernel_parameters.alpha),
+            "rho"   => Float64(stats.kernel_parameters.rho),
+            "gamma" => Float64(stats.kernel_parameters.gamma),
+        ),
+        "movement_statistics" => Dict{String, Any}(
+            string(k) => v for (k, v) in pairs(stats.movement_statistics)
+        ),
+        "tethysbio_parameters" => tb,
+    )
+
+    open(out_path, "w") do io
+        TOML.print(io, payload)
+    end
+    return out_path
 end

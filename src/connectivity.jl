@@ -110,20 +110,21 @@ function resolve_region_partition(
         labels = String[String(l) for l in region_labels]
     else
         try_labels = nothing
-        if params !== nothing && hasproperty(params, :region_labels)
+        if params !== nothing && hasproperty(params, :region_labels) && !isempty(params.region_labels)
             try_labels = params.region_labels
+        elseif hasproperty(loaded, :region_labels) && loaded.region_labels isa AbstractVector &&
+               !isempty(loaded.region_labels)
+            try_labels = loaded.region_labels
         end
         if try_labels isa AbstractVector && length(try_labels) == n_regions
             labels = String[String(l) for l in try_labels]
-        elseif hasproperty(loaded, :region_labels) &&
-               loaded.region_labels isa AbstractVector &&
-               length(loaded.region_labels) == n_regions
-            labels = String[String(l) for l in loaded.region_labels]
         else
             labels = String[]
             for id in present
                 if id == unassigned_id
                     push!(labels, "Unassigned")
+                elseif try_labels isa AbstractVector && 1 <= id <= length(try_labels)
+                    push!(labels, String(try_labels[id]))
                 else
                     push!(labels, "Region $id")
                 end
@@ -171,17 +172,31 @@ function region_transition_matrix(P, region_map::Vector{Int})
 
     P_reg = zeros(Float64, n_regions, n_regions)
     counts = zeros(Int, n_regions)
-    for u in 1:n
-        r = region_map[u]
+    if P isa SparseMatrixCSC
+        rows = rowvals(P)
+        vals = nonzeros(P)
         for v in 1:n
-            P_reg[r, region_map[v]] += P[u, v]
+            rv = region_map[v]
+            counts[rv] += 1
+            for ptr in nzrange(P, v)
+                u = rows[ptr]
+                P_reg[region_map[u], rv] += vals[ptr]
+            end
         end
-        counts[r] += 1
+    else
+        for u in 1:n
+            r = region_map[u]
+            for v in 1:n
+                P_reg[r, region_map[v]] += P[u, v]
+            end
+            counts[r] += 1
+        end
     end
     for r in 1:n_regions
-        if counts[r] > 0
-            P_reg[r, :] ./= counts[r]
-        end
+        counts[r] > 0 || throw(DomainError(
+            r, "region $r has zero units in region_map"
+        ))
+        P_reg[r, :] ./= counts[r]
     end
     for r in 1:n_regions
         row_total = sum(P_reg[r, :])

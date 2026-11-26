@@ -165,29 +165,25 @@ include("test_fixtures.jl")
     end
 
     # --------------------------------------------------------------------------
-    @testset "A* and circuit NaN/Inf robustness" begin
-        coords = [(0.0, 0.0), (1.0, 1.0), (1.0, -1.0), (2.0, 0.0)]
+    @testset "Markov-bridge and circuit NaN/Inf robustness" begin
         Wq = spzeros(4, 4)
         Wq[1, 2] = 1.0; Wq[2, 1] = 1.0
         Wq[1, 3] = 1.0; Wq[3, 1] = 1.0
         Wq[2, 4] = 1.0; Wq[4, 2] = 1.0
         Wq[3, 4] = 1.0; Wq[4, 3] = 1.0
 
-        # Baseline: a connected path is found.
-        p = astar_least_cost_path(coords, Wq, 1, 4)
+        Pq = construct_stochastic_transition_kernel(Wq, [0.4, 0.6, 0.5, 0.7])
+        p = predict_bridge_path(Pq, 1, 4, 4)
         @test first(p) == 1 && last(p) == 4
+        @test_throws ArgumentError predict_bridge_path(Pq, 0, 4, 4)
 
-        # Non-finite resistance surfaces degrade loudly, not "the search silently
-        # returns arbitrary paths".
-        @test_throws DomainError astar_least_cost_path(
-            coords, Wq, 1, 4; hsi = fill(NaN, 4))
-        @test_throws DomainError astar_least_cost_path(
-            coords, Wq, 1, 4; resistance = [1.0, 2.0, Inf, 1.0])
+        P_nan = sparse(copy(Pq))
+        P_nan[1, 2] = NaN
+        @test_throws DomainError predict_bridge_path(P_nan, 1, 4, 4)
 
         # Non-finite adjacency weights degrade loudly.
         W_nan = copy(Wq)
         W_nan[1, 2] = NaN
-        @test_throws DomainError astar_least_cost_path(coords, W_nan, 1, 4)
         @test_throws DomainError build_circuit_laplacian(W_nan)
 
         # Circuit: NaN HSI at a marine unit is rejected; at a land unit it is
@@ -261,12 +257,12 @@ include("test_fixtures.jl")
     end
 
     # --------------------------------------------------------------------------
-    @testset "Notebook field-mapping contract" begin
-        # Regression guard for the notebook's field mappings against the
+    @testset "Notes field-mapping contract" begin
+        # Regression guard for the documentation's field mappings against the
         # checkpoint schema written by src/pipeline.jl. The textual contract
-        # entries must stay in lock-step with notebooks/TethysPathNotes.jl;
+        # entries must stay in lock-step with docs/TethysPathNotes.md;
         # the execution checks below run only when the checkpoint exists.
-        nb_path = joinpath(@__DIR__, "..", "notebooks", "TethysPathNotes.jl")
+        nb_path = joinpath(@__DIR__, "..", "docs", "TethysPathNotes.md")
         notebook_checks = [
             ("loaded.mesh.n_units", "mesh size read via loaded.mesh, not loaded"),
             ("count(!iszero,", "sparse/dense kernel active counting"),
@@ -274,10 +270,10 @@ include("test_fixtures.jl")
             ("bottleneck_mask", "domain bottleneck counting"),
             ("pinch_mask", "circuit pinch metrics"),
             ("posterior_predictive", "validation summary entry point"),
-            ("MovementAnalysis = TethysPath", "legacy checkpoint load alias"),
         ]
         if isfile(nb_path)
             nb_text = read(nb_path, String)
+            @test !occursin("const MovementAnalysis = TethysPath", nb_text)
             for (needle, why) in notebook_checks
                 @test occursin(needle, nb_text) || @info(
                     "notebook contract entry moved: $needle ($why)"

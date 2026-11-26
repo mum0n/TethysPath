@@ -26,17 +26,14 @@ function TethysPath.plot_posterior_predictive_check(ppc, output_dir)
     mkpath(output_dir)
     plot_file = joinpath(output_dir, "posterior_predictive_diagnostics.png")
 
-    p1 = plot(ppc.brier_scores; label = "Brier Score", xlabel = "Draw",
-              ylabel = "Score", title = "Posterior Predictive: Brier Score",
-              legend = :topright)
-    p2 = plot(ppc.kl_divergences; label = "KL Divergence", xlabel = "Draw",
+    p1 = plot(ppc.kl_divergences; label = "KL Divergence", xlabel = "Draw",
               ylabel = "Divergence", title = "Posterior Predictive: KL Divergence",
               legend = :topright)
-    p3 = plot(1:length(ppc.observed_dist), ppc.observed_dist;
+    p2 = plot(1:length(ppc.observed_dist), ppc.observed_dist;
               label = "Observed", xlabel = "Spatial Unit", ylabel = "Probability",
               title = "Recapture Probability Distribution")
 
-    plot(p1, p2, p3; layout = (3, 1), size = (800, 900))
+    plot(p1, p2; layout = (2, 1), size = (800, 650))
     savefig(plot_file)
     return plot_file
 end

@@ -1,48 +1,18 @@
 # TethysPath — Remaining Work Items
 
-Tracking items for the TethysPath movement-ecology package. Larval-biology notes that
-used to live here have been archived to `docs/HISTORICAL_LARVAL_NOTES.md` (they belong
-to the ParticleTracking project).
+Tracking items for the `TethysPath` movement-ecology package.
 
-## Phase 6 — Notebook migration (in progress)
-- [x] Move dashboard/Leaflet export logic into `notebooks/TethysPathNotes.jl`; keep
-  `export_dashboards` as a no-op shim in `src/pipeline.jl`.
-- [x] Document the figure conventions (`FIGURE_CONVENTIONS.md`, "degrade loudly" rule).
-- [x] Migrate JLD2 checkpoints to the `TethysPath` module name
-  (`scripts/migrate_checkpoint.jl`, run 2026-10-23).
-- [x] Delete `src/dashboards.jl` (superseded by the notebook; a byte-exact receipt
-  copy is kept at `src/dashboards.jl.backup`, gitignored). The former placeholder
-  `.backup` file was empty (0 bytes), so it was replaced by the real copy before
-  deletion on 2026-10-23.
+## Completed Architecture & Diagnostic Milestones
+- [x] Consolidate inputs under `inputs/` (including `cfagulf.dat` covering CFA 19 and Southern Gulf of St. Lawrence) and store outputs/checkpoints as Zarr archives (`movement_checkpoint.zarr`, `movement_results_checkpoint.zarr`) in `lakehouse/TethysPath`.
+- [x] Upgrade shoreline and inland-lake masking to `1.25`-arcminute `"h"` global raster (`land_mask_from_global_mask`), sever overland/isthmus adjacency edges (`sever_raster_land_edges!`), mask enclosed inland pockets (`mask_enclosed_inland_pockets!`), and radially clip coastal polygon vertices to ocean shorelines (`clip_polygons_to_ocean!`).
+- [x] Replace deterministic `A*` routing, endpoint tortuosity/efficiency ratios, 1-day uniform regional matrices, and cell-wise Brier scores with conditioned Markov bridges (`:bridge`), 1-year ($\mathbf{P}^{365}$) HSI-weighted regional connectivity, posterior predictive KL divergence, spatial corridor canalization $K(u)$, $100 \times 100\text{ km}$ map-anchored compass bearing roses, bathymetric/thermal/HSI gradient taxis projections, and stratified `OTN` acoustic vs. `BIO` commercial trap inference.
+- [x] Export consolidated single-file interactive Leaflet dashboard (`movement_dashboard.html`), including Canvas-rendered locally smoothed predicted trajectories across every mark-recapture event colour-coded by liberty interval with `TethysDrift`-style click-map path highlighting.
 
-## Numerics & validation
-- [x] Property-test invariants for coordinate-space helpers and transition kernels
-  (`test/test_numerics.jl`, `:numerics` segment).
-- [x] NaN/Inf robustness tests for A* / circuit diagnostics (disconnected components,
-  unreachable sources).
-- [x] Notebook field-mapping regression tests (kernel row sums, `#DATA-CHECK` anchors).
-- [ ] Deeper posterior-predictive coverage: verify `brier_*`/`kl_*` CIs are
-  bootstrap-consistent with the sample sizes in `validation.summary` (currently trusted
-  from `pipeline.jl`).
-- [ ] Joint survey density likelihood vs. telemetry fit: sensitivity of the Negative
-  Binomial dispersion `r` to survey zero-inflation (Phase 1 follow-up).
-- [ ] Verify that `synthesize_adr_results`'s propagator inversion
-  (`M_prop = I - v*A - D*L`, inverted to obtain a "transition matrix") is the
-  intended model, or construct `Gamma_mean` directly from the advection/diffusion
-  operators — flagged by an embedded NOTE in `src/movement.jl`.
+## Numerics & Modeling Follow-Ups
+- [ ] Joint survey density likelihood vs. telemetry fit: evaluate sensitivity of Negative Binomial dispersion $r$ to survey zero-inflation when paired trawl abundance data (`surveydata_file`) are supplied.
+- [ ] Higher-efficiency MCMC proposals (e.g., adaptive covariance Haario-Bardenet RW-MH or slice/NUTS with cached sparse sensitivity) to raise effective sample size (`ESS`) on multi-thousand-observation telemetry likelihoods.
+- [ ] Audit `synthesize_adr_results` implicit Euler resolvent normalization (`M_prop = I - dt*(v*A - D*L)`) against direct sparse matrix exponential uniformization for large step sizes.
 
-## Maintainability (Phase 7 — queued, see `docs/PHASE7_IMPROVEMENT_PLAN.md`)
-- [ ] Split `src/movement.jl` (8.6k lines) into focused sub-modules behind the same API
-  (telemetry ingestion / kernel & simulation / A* / posterior vis).
-- [ ] Type-stabilise hot kernels (avoid `Vector{Any}` accumulation in
-  `simulate_trajectories` path ensemble code).
-- [ ] Cache expensive spatial transforms alongside mesh construction (`kstep_transition_cache`
-  covers kernels; extend to stratum polygons and coordinate scaling factors).
-
-## Documentation
-- [x] `docs/movement_analysis.md` Phase 6 rewritten for the notebook workflow;
-  `render_html` documented as default-off.
-- [x] Coordinate-space assumptions documented at API boundaries (`haversine_distance`,
-  `bearing_deg`, `lonlat_to_xy_km`, `effective_resistance_matrix`).
-- [ ] Build `docs/` with Documenter and promote inline docstrings to a reference manual
-  (currently `docs/movement_analysis.md` is the only user-facing page).
+## Maintainability & Documentation
+- [ ] Partition `src/movement.jl` (~8.4k lines) into focused sub-files (`kernels.jl`, `bridges.jl`, `diagnostics.jl`, `synthetic.jl`) under the unified `TethysPath` module namespace.
+- [ ] Optional `Documenter.jl` build configuration (`docs/make.jl`) to render API docstrings alongside `docs/movement_analysis.md` and `docs/TethysPathNotes.md`.

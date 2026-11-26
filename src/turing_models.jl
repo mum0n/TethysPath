@@ -37,15 +37,19 @@ Arguments accept scalars or arrays and broadcast, so this serves both a single
 model evaluation and a vector of posterior draws.
 """
 function movement_alpha_rho(velocity::Real, diffusion::Real)
+    velocity >= 0 || throw(DomainError(velocity, "velocity must be non-negative"))
+    diffusion >= 0 || throw(DomainError(diffusion, "diffusion must be non-negative"))
     tot = velocity + diffusion + 1e-6
-    alpha = clamp(velocity / tot, 0.0, 1.0)
+    alpha = velocity / tot
     rho   = clamp(1.0 / (1.0 + tot), 0.01, 0.95)
     return alpha, rho
 end
 
 function movement_alpha_rho(velocity::AbstractArray, diffusion::AbstractArray)
+    all(>=(0), velocity) || throw(DomainError("velocity entries must be non-negative"))
+    all(>=(0), diffusion) || throw(DomainError("diffusion entries must be non-negative"))
     tot = velocity .+ diffusion .+ 1e-6
-    alpha = clamp.(velocity ./ tot, 0.0, 1.0)
+    alpha = velocity ./ tot
     rho   = clamp.(1.0 ./ (1.0 .+ tot), 0.01, 0.95)
     return alpha, rho
 end
@@ -54,7 +58,7 @@ end
     build_sparse_transition_kernel(W, hsi, gamma, residence, advection, land_mask)
 
 Memory-efficient stochastic transition kernel constructor for discrete-time telemetry models.
-Generates a `SparseMatrixCSC` instead of a dense matrix to vastly reduce memory allocations
+Generates a `SparseMatrixCSC` instead of a dense matrix to avoid `O(S^2)` allocations
 during Turing MCMC sampling.
 
 # Mathematical Formulation
@@ -106,11 +110,17 @@ function build_sparse_transition_kernel(
     sizehint!(J_idx, nnz(W) + S)
     sizehint!(V_val, nnz(W) + S)
 
-    rows = rowvals(W)
-    vals = nonzeros(W)
+    # Transpose once so column i of Wt is row i of W (outgoing edges i -> j),
+    # supporting both symmetric and directed/asymmetric adjacency matrices.
+    Wt = SparseMatrixCSC(transpose(W))
+    rows = rowvals(Wt)
+    vals = nonzeros(Wt)
 
     # Use T throughout so ForwardDiff.Dual partials are preserved
-    alpha = clamp(T(advection), T(0), T(1))
+    alpha = T(advection)
+    (zero(T) <= alpha <= one(T)) || throw(DomainError(
+        advection, "advection weight alpha must lie in [0, 1]"
+    ))
     gam    = T(gamma)
 
     # `residence` may be a scalar or a per-unit vector. A scalar keeps the
@@ -124,7 +134,13 @@ function build_sparse_transition_kernel(
             "$(length(residence))."
         ))
     end
-    rho_shared = unit_residence ? zero(T) : clamp(T(residence), T(0), T(0.999))
+    if !unit_residence
+        r_val = T(residence)
+        (zero(T) <= r_val <= one(T)) || throw(DomainError(
+            residence, "residence probability rho must lie in [0, 1]"
+        ))
+    end
+    rho_shared = unit_residence ? zero(T) : min(T(residence), T(0.999))
 
     # A NaN or Inf habitat value silently kills a transition row: comparisons
     # with NaN are false, so the assembled entry never survives the
@@ -141,7 +157,15 @@ function build_sparse_transition_kernel(
     end
 
     for i in 1:S
-        rho = unit_residence ? clamp(T(residence[i]), T(0), T(0.999)) : rho_shared
+        if unit_residence
+            r_i = T(residence[i])
+            (zero(T) <= r_i <= one(T)) || throw(DomainError(
+                residence[i], "residence probability rho[$i] must lie in [0, 1]"
+            ))
+            rho = min(r_i, T(0.999))
+        else
+            rho = rho_shared
+        end
         w_move = one(T) - rho
         w_adv  = w_move * alpha
         w_diff = w_move * (one(T) - alpha)
@@ -158,7 +182,7 @@ function build_sparse_transition_kernel(
         # 1. Identify eligible marine neighbors (excluding self-loops)
         nbrs  = Int[]
         nbr_w = T[]
-        for idx in nzrange(W, i)
+        for idx in nzrange(Wt, i)
             j = rows[idx]
             if j != i && (isnothing(land_mask) || !land_mask[j])
                 push!(nbrs, j)
@@ -436,8 +460,19 @@ win is correctness, plus removing the obstacle to a gradient sampler later.
     ks::Vector{Int},
     W::SparseMatrixCSC{Float64, Int},
     hsi::Vector{Float64},
-    land_mask::Union{Nothing, BitVector, Vector{Bool}}
+    land_mask::Union{Nothing, BitVector, Vector{Bool}},
+    effort_weights::Union{Nothing, Vector{Float64}} = nothing
 )
+    if effort_weights !== nothing
+        length(effort_weights) == size(W, 1) || throw(DimensionMismatch(
+            "effort_weights length ($(length(effort_weights))) must match W ($(size(W, 1)))"
+        ))
+        all(e -> isfinite(e) && e > 0.0, effort_weights) || throw(DomainError(
+            effort_weights,
+            "effort_weights must be strictly positive and finite"
+        ))
+    end
+
     mu_velocity  ~ truncated(Distributions.Normal(0.3, 0.2), 0.0, 0.95)
     mu_diffusion ~ truncated(Distributions.Normal(0.1, 0.2), 0.0, Inf)
     mu_gamma     ~ Distributions.Normal(1.0, 1.0)
@@ -457,8 +492,21 @@ win is correctness, plus removing the obstacle to a gradient sampler later.
     # `kstep_transition_cache`.
     cache = kstep_transition_cache(P_T, releases, ks)
 
-    for n in eachindex(releases)
-        recaptures[n] ~ Categorical(cache[(releases[n], ks[n])])
+    if effort_weights === nothing
+        for n in eachindex(releases)
+            recaptures[n] ~ Categorical(cache[(releases[n], ks[n])])
+        end
+    else
+        # Reweight k-step transition rows by spatial recapture effort/detection offset.
+        eff_cache = Dict{Tuple{Int, Int}, valtype(cache)}()
+        for (key, probs) in cache
+            q = probs .* effort_weights
+            s = sum(q)
+            eff_cache[key] = s > 0.0 ? (q ./ s) : probs
+        end
+        for n in eachindex(releases)
+            recaptures[n] ~ Categorical(eff_cache[(releases[n], ks[n])])
+        end
     end
 end
 

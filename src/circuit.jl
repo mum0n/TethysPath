@@ -756,10 +756,11 @@ function identify_ecological_pinchpoints(
     end
 
     active_scores = filter(s -> s > 1e-9, pinch_score)
+    tq = _validate_unit_prob(top_quantile, "top_quantile")
     threshold = if isempty(active_scores)
         0.0
     else
-        quantile(active_scores, clamp(Float64(top_quantile), 0.0, 1.0))
+        quantile(active_scores, tq)
     end
 
     pinch_mask = [pinch_score[i] >= threshold && pinch_score[i] > 1e-9 for i in 1:S]
@@ -841,7 +842,7 @@ function identify_stochastic_pinchpoints(
     res::PosteriorCircuitResult;
     prob_threshold::Real = 0.80
 )
-    thresh = clamp(Float64(prob_threshold), 0.0, 1.0)
+    thresh = _validate_unit_prob(prob_threshold, "prob_threshold")
     robust_mask = [res.pinchpoint_prob[i] >= thresh for i in eachindex(res.pinchpoint_prob)]
     return robust_mask, thresh, count(robust_mask)
 end
@@ -945,7 +946,7 @@ function posterior_circuit_inference(
 
     rng = isnothing(seed) ? Random.default_rng() : MersenneTwister(seed)
 
-    # 1. Assemble posterior realizations of habitat suitability
+    # Assemble posterior realizations of habitat suitability
     h_draws::Matrix{Float64} = if !isnothing(hsi_samples)
         if size(hsi_samples, 1) != S
             throw(DimensionMismatch(
@@ -989,10 +990,10 @@ function posterior_circuit_inference(
     dens_mat = zeros(Float64, S, M_total)
     edge_accum = spzeros(Float64, S, S)
     pinch_counts = zeros(Int, S)
-    t_quant = clamp(Float64(top_quantile), 0.0, 1.0)
+    t_quant = _validate_unit_prob(top_quantile, "top_quantile")
     c_pow = Float64(conductance_power)
 
-    # 2. Iterate across stochastic draws
+    # Evaluate circuit density across stochastic draws
     for m in 1:M_total
         h_m = h_draws[:, m]
 
@@ -1019,10 +1020,10 @@ function posterior_circuit_inference(
         end
     end
 
-    # 3. Compute posterior expectations and credible intervals
+    # Posterior expectations and credible intervals
     mean_dens = vec(mean(dens_mat, dims=2))
     sd_dens = M_total > 1 ? vec(std(dens_mat, dims=2)) : zeros(Float64, S)
-    alpha_lo = clamp(Float64(ci_alpha) / 2.0, 0.0, 0.5)
+    alpha_lo = _validate_unit_prob(ci_alpha, "ci_alpha") / 2.0
     alpha_hi = 1.0 - alpha_lo
 
     ci_lo = [quantile(dens_mat[i, :], alpha_lo) for i in 1:S]

@@ -9,11 +9,19 @@ const _DepthRangeArg = Union{
 using Arrow
 using DataFrames
 
+function _resolve_output_dir(output_dir::AbstractString)::String
+    s = strip(String(output_dir))
+    if isempty(s) || replace(s, '\\' => '/') == "../lakehouse/TethysPath"
+        return movement_store_root()
+    end
+    return String(output_dir)
+end
+
 """
     _require_r_backend(what) -> Nothing
 
-Raise a clear, actionable error when an R-backed code path is reached without
-`RCall` installed.
+Raise an error naming the missing object when an R-backed code path is reached
+without `RCall` installed.
 
 R is an optional dependency. `TethysPathRCallExt` is loaded automatically
 when `RCall` and a working R are both present; this stub only fires when they are
@@ -101,8 +109,8 @@ function r_to_ipc(filepath::AbstractString)
         # loads without an R installation.
         _r_ipc_convert(filepath, temp_ipc)
 
-        # Read the raw bytes from disk into memory. This avoids Windows file-locking 
-        # issues that occur if we were to memory-map the file directly from disk.
+        # Read raw bytes into memory to avoid Windows file-locking issues from
+        # memory-mapping the file directly on disk.
         ipc_bytes = read(temp_ipc)
         
         # Construct the Arrow Table from the in-memory byte array, and wrap it in a 
@@ -185,12 +193,12 @@ function load_movement_dataset(;
 
     dir = if data_dir !== nothing
         data_dir
-    elseif isdir(joinpath(@__DIR__, "..", "data"))
-        normpath(joinpath(@__DIR__, "..", "data"))
-    elseif isdir(joinpath(@__DIR__, "data"))
-        joinpath(@__DIR__, "data")
+    elseif isdir(joinpath(@__DIR__, "..", "inputs"))
+        normpath(joinpath(@__DIR__, "..", "inputs"))
+    elseif isdir(joinpath(@__DIR__, "inputs"))
+        joinpath(@__DIR__, "inputs")
     else
-        normpath(joinpath(@__DIR__, "..", "..", "docs", "movement", "data"))
+        normpath(joinpath(@__DIR__, "..", "..", "docs", "movement", "inputs"))
     end
 
     actual_tagging = if tagging_file !== nothing
@@ -224,7 +232,8 @@ function load_movement_dataset(;
     actual_hsi = if hsi_file !== nothing
         hsi_file
     else
-        joinpath(dir, "hsi.jld2")
+        h_zarr = joinpath(dir, "hsi.zarr")
+        isdir(h_zarr) ? h_zarr : joinpath(dir, "hsi.jld2")
     end
 
     actual_sppoly = if sppoly_file !== nothing
@@ -235,7 +244,7 @@ function load_movement_dataset(;
 
     return prepare_movement_data(
         tagging;
-        hsi_file      = isfile(actual_hsi) ? actual_hsi : nothing,
+        hsi_file      = ispath(actual_hsi) ? actual_hsi : nothing,
         sppoly_file   = isfile(actual_sppoly) ? actual_sppoly : nothing,
         radius_km     = radius_km,
         time_interval = time_interval,
@@ -543,16 +552,21 @@ function reconnect_severed_components(
     keep::AbstractVector{Bool},
     W::AbstractMatrix{<:Real},
     centroids::AbstractVector;
-    max_bridge_cells::Int = 64
+    navigable_mask::Union{Nothing, AbstractVector{Bool}} = nothing,
+    max_bridge_cells::Int = 32
 )::Tuple{BitVector, Int, Int}
     n = length(keep)
     keep = BitVector(keep)
     isempty(keep) && return (keep, 0, 0)
 
-    # Adjacency lists, taken from `W` so the bridge uses the graph the model uses.
+    # Adjacency lists, restricted strictly to navigable marine units so bridging
+    # can never traverse terrestrial land, inland lakes, or severed barriers.
     nbrs = [Int[] for _ in 1:n]
     rows, cols = findnz(sparse(W))
     for (r, c) in zip(rows, cols)
+        if navigable_mask !== nothing && (!navigable_mask[r] || !navigable_mask[c])
+            continue
+        end
         push!(nbrs[r], Int(c))
     end
 
@@ -901,35 +915,9 @@ end
     group_map = hasproperty(data, :group_lookup) ?
                 data.group_lookup : Dict(1 => "All")
 
-    # Regions of interest come from polygon files paired with `region_labels`.
-    # Deriving the unit-to-region map from the polygons is preferred over
-    # hand-building it, so an explicit `region_map` only fills the gaps.
-    region_map = if !isempty(params.region_polygon_files)
-        labels = isempty(params.region_labels) ?
-            ["Region $i" for i in eachindex(params.region_polygon_files)] :
-            params.region_labels
-        polys = load_region_polygons(params.region_polygon_files, labels)
-        region_map_from_polygons(mesh.centroids_lonlat, polys)
-    else
-        nothing
-    end
+    region_map = nothing
     conn_region_labels = nothing
-    if region_map !== nothing
-        explicit = isnothing(params.region_map) ? Dict{Int,Int}() : params.region_map
-        for (unit, r) in explicit
-            1 <= unit <= length(region_map) && (region_map[unit] = r)
-        end
-        n_r = maximum(region_map)
-        n_r >= 1 || error(
-            "No mesh unit falls inside any region polygon; check region_polygon_files."
-        )
-        conn_region_labels = isempty(params.region_labels) ?
-            ["Region $i" for i in 1:n_r] : params.region_labels
-        verbose && println(
-            "  Regions: $(length(conn_region_labels)) from polygon files; " *
-            "$(count(>(0), region_map)) / $(length(region_map)) units assigned"
-        )
-    end
+    bottom_temp = nothing
     land_mask = hasproperty(data, :land_mask) ? data.land_mask : nothing
     n_spatial = mesh.n_units
 
@@ -980,7 +968,7 @@ end
             depth_levels = [0.0, 25.0, 50.0, 100.0, 175.0],
             times        = [1.0]
         )
-        fine_mesh = build_hex_mesh_planar(
+        fine_mesh = build_hex_mesh(
             bathy.grid_lon, bathy.grid_lat;
             radius_km = Float64(params.hex_radius_km)
         )
@@ -993,26 +981,62 @@ end
             bathy.au, fine_mesh; method = :area_weighted
         )
         resharded_hydro  = reshard_spatial_field(P_transfer, hydro)
-        resharded_depths = reshard_spatial_field(P_transfer, bathy.depths)
+        # Transfer signed elevation rather than zero-clamped depth so coastal cells
+        # predominantly on positive-elevation land are not assigned artificial marine depth.
+        resharded_elev = hasproperty(bathy, :elevation) ?
+            reshard_spatial_field(P_transfer, vec(bathy.elevation)) :
+            .-reshard_spatial_field(P_transfer, bathy.depths)
+        resharded_depths = Float64[e >= 0.0 ? 0.0 : -Float64(e) for e in resharded_elev]
+        signed_depth_for_land = Float64[-Float64(e) for e in resharded_elev]
+        bottom_temp = if !(hasproperty(bathy, :is_synthetic) && bathy.is_synthetic)
+            try
+                hydro_woa = Tethys.fetch_boundary_hydrography(
+                    :woa23;
+                    lon_range = (min_lon, max_lon),
+                    lat_range = (min_lat, max_lat),
+                    month     = 0,
+                    verbose   = false
+                )
+                Float64[
+                    hydro_woa.T(
+                        Float64(fine_mesh.centroids_lonlat[u][1]),
+                        Float64(fine_mesh.centroids_lonlat[u][2]),
+                        -abs(Float64(resharded_depths[u])),
+                        0.0
+                    )
+                    for u in 1:fine_mesh.n_units
+                ]
+            catch
+                hasproperty(resharded_hydro, :temperature) ?
+                    Float64.(resharded_hydro.temperature) : nothing
+            end
+        elseif hasproperty(resharded_hydro, :temperature)
+            Float64.(resharded_hydro.temperature)
+        else
+            nothing
+        end
 
         mesh      = fine_mesh
         W         = fine_mesh.W
+        fine_polys = hasproperty(fine_mesh, :polygons_lonlat) ?
+            fine_mesh.polygons_lonlat : nothing
         land_mask = identify_land_units(
             fine_mesh.centroids_lonlat;
-            depth         = resharded_depths,
-            land_polygons = land_polys,
+            polygons        = fine_polys,
+            depth           = signed_depth_for_land,
+            depth_threshold = 2.0,
+            land_polygons   = land_polys,
         )
         if params.land_source === :landmask
-            # A unit can be shallow enough to read as marine on bathymetry yet
-            # still sit on land; the global raster settles those disagreements.
             land_mask .|= land_mask_from_global_mask(
                 fine_mesh.centroids_lonlat;
+                polygons     = fine_polys,
                 resolution   = params.land_mask_resolution,
                 grid_minutes = params.land_mask_grid_minutes,
             )
             verbose && println(
-                "  Land units: $(count(land_mask)) / $(fine_mesh.n_units) " *
-                "(global land/sea mask)"
+                "  Land/lake units: $(count(land_mask)) / $(fine_mesh.n_units) " *
+                "(global $(params.land_mask_grid_minutes)-min '$(params.land_mask_resolution)' mask)"
             )
         end
 
@@ -1023,7 +1047,7 @@ end
             verbose && println("  Evaluating real habitat suitability via Tethys...")
             build_geodata_habitat_suitability(
                 fine_mesh.centroids_lonlat;
-                polygons = hasproperty(fine_mesh, :polygons_lonlat) ? fine_mesh.polygons_lonlat : nothing,
+                polygons = fine_polys,
                 lon_range = (min_lon, max_lon),
                 lat_range = (min_lat, max_lat),
                 depths = resharded_depths,
@@ -1045,11 +1069,40 @@ end
             fine_mesh.W, hsi_fine, land_mask
         )
 
-        # `monthly_hsi` was built on the original mesh, so its rows index a
-        # different set of units than everything resharded above. It needs a
-        # transfer matrix from the *original* mesh -- not from the bathymetry
-        # grid, which is what P_transfer maps -- or every time-varying kernel
-        # lookup would index the wrong units.
+        sever_land_crossing_edges!(
+            W, fine_mesh.centroids_lonlat; land_polygons = land_polys
+        )
+        if params.land_source === :landmask
+            n_sev_ras = sever_raster_land_edges!(
+                W, fine_mesh.centroids_lonlat;
+                resolution   = params.land_mask_resolution,
+                grid_minutes = params.land_mask_grid_minutes
+            )
+            verbose && n_sev_ras > 0 && println(
+                "  Severed $(div(n_sev_ras, 2)) overland/isthmus adjacency edges."
+            )
+        end
+
+        n_enclosed = mask_enclosed_inland_pockets!(land_mask, W)
+        if n_enclosed > 0
+            W, hsi_vec = apply_land_barrier(W, hsi_vec, land_mask)
+            verbose && println(
+                "  Masked $n_enclosed enclosed inland/lake pocket unit(s)."
+            )
+        end
+
+        if params.land_source === :landmask && fine_polys !== nothing
+            n_clip = clip_polygons_to_ocean!(
+                fine_polys, fine_mesh.centroids_lonlat;
+                land_mask    = land_mask,
+                resolution   = params.land_mask_resolution,
+                grid_minutes = params.land_mask_grid_minutes
+            )
+            verbose && n_clip > 0 && println(
+                "  Clipped $n_clip coastal hexagon boundary polygons to ocean shoreline."
+            )
+        end
+
         if !isempty(monthly_hsi) && size(monthly_hsi, 1) != fine_mesh.n_units
             monthly_hsi = reshard_spatial_field(P_orig_to_fine, monthly_hsi)
             for col in axes(monthly_hsi, 2)
@@ -1059,11 +1112,15 @@ end
                 "  Rescaled monthly HSI to $(size(monthly_hsi, 1)) x " *
                 "$(size(monthly_hsi, 2)) fine-mesh units"
             )
+        elseif !isempty(monthly_hsi) && size(monthly_hsi, 1) == fine_mesh.n_units
+            for col in axes(monthly_hsi, 2)
+                monthly_hsi[land_mask, col] .= 0.0
+            end
         end
-        sever_land_crossing_edges!(W, fine_mesh.centroids_lonlat)
         n_spatial  = fine_mesh.n_units
 
-        # Remap mark-recapture observations to active marine units
+        # Remap mark-recapture observations directly from GPS coordinates onto active
+        # open-marine units so coastal releases never bounce through inland cells.
         obs_df       = copy(obs_df)
         fine_cents   = fine_mesh.centroids_lonlat
         marine_mask  = .!land_mask .& (vec(sum(W; dims = 2)) .> 0)
@@ -1072,14 +1129,19 @@ end
         end
         marine_cents = fine_cents[marine_units]
 
-        orig_rel = [data.mesh.centroids_lonlat[r] for r in obs_df.release]
-        orig_rec = [data.mesh.centroids_lonlat[r] for r in obs_df.recapture]
-        rel_sub  = map_to_units(
-            [c[1] for c in orig_rel], [c[2] for c in orig_rel], marine_cents
-        )
-        rec_sub  = map_to_units(
-            [c[1] for c in orig_rec], [c[2] for c in orig_rec], marine_cents
-        )
+        has_gps = hasproperty(obs_df, :lon) && hasproperty(obs_df, :lat) &&
+                  hasproperty(obs_df, :rec_lon) && hasproperty(obs_df, :rec_lat)
+        rel_lons = has_gps ? Float64.(obs_df.lon) :
+            [Float64(data.mesh.centroids_lonlat[r][1]) for r in obs_df.release]
+        rel_lats = has_gps ? Float64.(obs_df.lat) :
+            [Float64(data.mesh.centroids_lonlat[r][2]) for r in obs_df.release]
+        rec_lons = has_gps ? Float64.(obs_df.rec_lon) :
+            [Float64(data.mesh.centroids_lonlat[r][1]) for r in obs_df.recapture]
+        rec_lats = has_gps ? Float64.(obs_df.rec_lat) :
+            [Float64(data.mesh.centroids_lonlat[r][2]) for r in obs_df.recapture]
+
+        rel_sub = map_to_units(rel_lons, rel_lats, marine_cents)
+        rec_sub = map_to_units(rec_lons, rec_lats, marine_cents)
         obs_df.release   = marine_units[rel_sub]
         obs_df.recapture = marine_units[rec_sub]
 
@@ -1133,6 +1195,38 @@ end
             "  Multiresolution mesh: $n_spatial units " *
             "(Fine: $(count(mesh.is_fine)))"
         )
+    end
+
+    # Resolve management-region polygons on the active pre-prune mesh so every fine
+    # hexagonal unit (including CFA 19 and Southern Gulf) receives its region label.
+    if !isempty(params.region_polygon_files) && hasproperty(mesh, :centroids_lonlat)
+        labels = isempty(params.region_labels) ?
+            ["Region $i" for i in eachindex(params.region_polygon_files)] :
+            params.region_labels
+        polys = load_region_polygons(params.region_polygon_files, labels)
+        region_map = region_map_from_polygons(mesh.centroids_lonlat, polys)
+        explicit = isnothing(params.region_map) ? Dict{Int, Int}() : params.region_map
+        for (unit, r) in explicit
+            1 <= unit <= length(region_map) && (region_map[unit] = r)
+        end
+        n_r = maximum(region_map; init = 0)
+        n_r >= 1 || error(
+            "No mesh unit falls inside any region polygon; check region_polygon_files."
+        )
+        conn_region_labels = isempty(params.region_labels) ?
+            ["Region $i" for i in 1:n_r] : params.region_labels
+        verbose && println(
+            "  Regions: $(length(conn_region_labels)) from polygon files; " *
+            "$(count(>(0), region_map)) / $(length(region_map)) units assigned"
+        )
+    elseif !isnothing(params.region_map) && !isempty(params.region_map)
+        region_map = ones(Int, n_spatial)
+        for (unit, r) in params.region_map
+            1 <= unit <= n_spatial && (region_map[unit] = r)
+        end
+        n_r = maximum(region_map)
+        conn_region_labels = isempty(params.region_labels) ?
+            ["Region $i" for i in 1:n_r] : params.region_labels
     end
 
     # -- 1c. Depth Range Traversal Barrier -----------------------------------
@@ -1379,26 +1473,49 @@ end
         # that cannot be read is an error, like every other configured input here.
         domain_geom = read_domain_polygon(params.sppoly_file)
         in_domain = geometries_in_domain(domain_geom, cents_tmp)
+        in_regions = region_map !== nothing && length(region_map) == n_spatial ?
+            BitVector(region_map .> 0) : falses(n_spatial)
 
-        # Retain a unit when it is in the depth window, is marine, and lies inside
-        # the footprint. With no footprint configured there is no spatial
-        # restriction and the mesh extent is the domain.
-        #
-        # There is deliberately no geographic fallback box here. The domain is
-        # whatever the configured footprint says it is; inventing a lat/lon
-        # rectangle for one study area inside general code made the domain depend
-        # on a constant that no test could see and no other dataset could override.
-        final_mask = keep_mesh_mask .& in_domain
+        # Where survey HSI estimates do not exist outside the sppoly footprint
+        # (such as CFA 19 and the Southern Gulf of St. Lawrence), assign a
+        # spatially and temporally homogeneous HSI (0.50) across in-depth marine
+        # units rather than boundary-extrapolated gradients or 1-cell bridges.
+        if domain_geom !== nothing
+            unsurveyed_marine = .!in_domain .& .!land_mask
+            if any(unsurveyed_marine)
+                hsi_vec[unsurveyed_marine] .= 0.50
+                if depth_mode == :hsi_only
+                    ood_unsurveyed = unsurveyed_marine .& out_of_depth
+                    hsi_vec[ood_unsurveyed] .= min.(
+                        hsi_vec[ood_unsurveyed], params.hsi_ood_floor
+                    )
+                end
+                if !isempty(monthly_hsi) && size(monthly_hsi, 1) == n_spatial
+                    for col in axes(monthly_hsi, 2)
+                        monthly_hsi[unsurveyed_marine, col] .= hsi_vec[unsurveyed_marine]
+                    end
+                end
+                verbose && println(
+                    "  Assigned homogeneous HSI = 0.50 across " *
+                    "$(count(unsurveyed_marine .& .!out_of_depth)) in-depth unsurveyed " *
+                    "marine units outside sppoly footprint."
+                )
+            end
+        end
 
-        n_outside_domain = count(keep_mesh_mask .& .!in_domain)
-        if domain_geom === nothing
+        final_mask = keep_mesh_mask .& (in_domain .| in_regions)
+
+        n_outside_domain = count(keep_mesh_mask .& .!(in_domain .| in_regions))
+        if domain_geom === nothing && !any(in_regions)
             verbose && println(
                 "  No domain footprint configured; the mesh extent is the domain."
             )
         else
             verbose && println(
-                "  Domain footprint: $(count(in_domain)) / $n_spatial units inside, " *
-                "$n_outside_domain in-depth marine units outside."
+                "  Domain + region footprint: $(count(final_mask)) / $n_spatial " *
+                "in-depth marine units inside ($(count(in_domain .& keep_mesh_mask)) " *
+                "surveyed, $(count(.!in_domain .& in_regions .& keep_mesh_mask)) " *
+                "homogeneous regional), $n_outside_domain outside."
             )
         end
 
@@ -1449,16 +1566,36 @@ end
                 "($(count(keep_mesh_mask)) units retained)..."
             )
 
-            # A retained set that falls into pieces is a filter artefact, not a
-            # result. Reconnect before anything is indexed, so every retained unit
-            # is reachable from the main body of the domain.
-            keep_mesh_mask, n_link, n_unlinked =
-                reconnect_severed_components(keep_mesh_mask, W, cents_tmp)
+            # Reconnect severed marine components strictly through in-depth, non-land
+            # marine units; never re-add land, inland lakes, or shallow coastal mudflats.
+            nav_bridge = .!land_mask .& .!out_of_depth
+            keep_mesh_mask, n_link, n_unlinked = reconnect_severed_components(
+                keep_mesh_mask, W, cents_tmp; navigable_mask = nav_bridge
+            )
+            if n_unlinked > 0
+                # Retain only the primary connected marine body (plus any secondary
+                # marine basin with >= 25 units) rather than leaving disconnected singletons.
+                nbrs_pr = [Int[] for _ in 1:n_spatial]
+                rw_p, cl_p = findnz(sparse(W))
+                for (r_p, c_p) in zip(rw_p, cl_p)
+                    (!land_mask[r_p] && !land_mask[c_p]) && push!(nbrs_pr[r_p], Int(c_p))
+                end
+                comps_pr = _connected_components(keep_mesh_mask, nbrs_pr)
+                if !isempty(comps_pr)
+                    max_c = maximum(length, comps_pr)
+                    for comp_k in comps_pr
+                        if length(comp_k) < min(25, max_c)
+                            for u_drop in comp_k
+                                keep_mesh_mask[u_drop] = false
+                            end
+                        end
+                    end
+                end
+            end
             if verbose && (n_link + n_unlinked) > 0
                 println(
-                    "  Reconnected the pruned domain: $n_link unit(s) added as " *
-                    "bridges, $n_unlinked unit(s) unreachable through marine " *
-                    "neighbours even with bridging."
+                    "  Reconnected the pruned domain: $n_link marine unit(s) added as " *
+                    "bridges, $n_unlinked isolated unit(s) outside marine connectivity."
                 )
             end
 
@@ -1498,6 +1635,9 @@ end
             end
             if resharded_depths !== nothing && length(resharded_depths) == n_spatial
                 resharded_depths = resharded_depths[keep_mesh_mask]
+            end
+            if bottom_temp !== nothing && length(bottom_temp) == n_spatial
+                bottom_temp = bottom_temp[keep_mesh_mask]
             end
             if region_map !== nothing && length(region_map) == n_spatial
                 region_map = region_map[keep_mesh_mask]
@@ -1541,26 +1681,8 @@ end
         end
     end
 
-    # Render and display/save map of resulting polygons after gridding and pruning
-    if params.render_html
-        try
-            tess_dir = params.output_dir
-            mkpath(tess_dir)
-            tess_path = joinpath(tess_dir, "tessellation_polygons.html")
-            tess_map = plot_tessellation_map(
-                mesh;
-                title = "$(params.species_name) Tessellated Spatial Domain",
-                depth = resharded_depths,
-                hsi = hsi_vec,
-                dark_mode = params.dark_mode,
-                output_file = tess_path
-            )
-            show_map(tess_map; output_file = tess_path)
-            verbose && println("  Grid polygon map: $tess_path")
-        catch err_map
-            _record_panel_skip("Grid map", err_map);             verbose && println("  (Grid map note: $(_error_note(err_map)))")
-        end
-    end
+    # Standalone tessellation_polygons.html is no longer written during full runs;
+    # the tessellation & depth view is included as a tab in movement_dashboard.html.
 
     return (
         data               = data,
@@ -1579,6 +1701,7 @@ end
         n_spatial          = n_spatial,
         resharded_hydro    = resharded_hydro,
         resharded_depths   = resharded_depths,
+        bottom_temp        = bottom_temp,
         parsed_depth_range = parsed_depth_range,
     )
 end
@@ -1606,20 +1729,119 @@ platform) the file is still written and the path is returned, so the map is neve
 # Returns
 Path to the rendered map.
 """
+function _render_tessellation_html(
+    mesh::NamedTuple,
+    output_file::AbstractString;
+    title::AbstractString = "Tessellated Spatial Domain",
+    depth = nothing,
+    hsi = nothing,
+    dark_mode::Bool = false
+)::String
+    mkpath(dirname(output_file))
+    polys = hasproperty(mesh, :polygons_lonlat) ? mesh.polygons_lonlat :
+            (hasproperty(mesh, :polygons) ? mesh.polygons : nothing)
+    vals = hsi !== nothing ? Float64.(hsi) :
+           (depth !== nothing ? Float64.(depth) : ones(Float64, mesh.n_units))
+    label = hsi !== nothing ? "HSI" : (depth !== nothing ? "Depth (m)" : "Unit")
+
+    # Delegate to TethysPlots if already loaded in the session
+    tp_id = Base.PkgId(Base.UUID("0e2c882d-e859-4e84-bf15-b0abe2d12c71"), "TethysPlots")
+    if haskey(Base.loaded_modules, tp_id) && polys !== nothing
+        tp = Base.loaded_modules[tp_id]
+        m = tp.leaflet_choropleth(
+            polys, vals;
+            title = String(title),
+            colorbar_label = label,
+            dark_mode = dark_mode
+        )
+        return tp.save_html(m, output_file)
+    end
+
+    # Lightweight self-contained Leaflet HTML fallback
+    cents = hasproperty(mesh, :centroids_lonlat) ? mesh.centroids_lonlat :
+            (hasproperty(mesh, :centroids) ? mesh.centroids : Tuple{Float64, Float64}[])
+    isempty(cents) && error("Mesh has no centroids_lonlat or polygons_lonlat to render.")
+    c_lon = mean(Float64(c[1]) for c in cents)
+    c_lat = mean(Float64(c[2]) for c in cents)
+    v_fin = filter(isfinite, vals)
+    v_min = isempty(v_fin) ? 0.0 : minimum(v_fin)
+    v_max = isempty(v_fin) ? 1.0 : maximum(v_fin)
+    span = max(v_max - v_min, 1e-9)
+
+    poly_items = String[]
+    if polys !== nothing
+        for i in eachindex(polys)
+            ring = polys[i]
+            length(ring) < 3 && continue
+            t = i <= length(vals) && isfinite(vals[i]) ? (vals[i] - v_min) / span : 0.0
+            t = max(0.0, min(1.0, t))
+            r = round(Int, 68 + 185 * t)
+            g = round(Int, 1 + 230 * t)
+            b = round(Int, 84 + 85 * (1.0 - t))
+            hex = "#" * string(r, base = 16, pad = 2) *
+                  string(g, base = 16, pad = 2) * string(b, base = 16, pad = 2)
+            coords = join(["[$(Float64(pt[2])),$(Float64(pt[1]))]" for pt in ring], ",")
+            push!(poly_items, "{\"c\":[$coords],\"k\":\"$hex\",\"v\":$(round(vals[min(i, length(vals))]; digits=3))}")
+        end
+    end
+
+    ocean_url = "https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}"
+    gray_url = dark_mode ?
+        "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}" :
+        "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}"
+
+    html = """
+    <!DOCTYPE html>
+    <html><head><meta charset="utf-8"><title>$title</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.min.css"/>
+    <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.min.js"></script>
+    <style>html,body,#map{margin:0;padding:0;width:100%;height:100%;background:#cbd5e1;}</style>
+    </head><body><div id="map"></div><script>
+    var map = L.map('map').setView([$c_lat, $c_lon], 6);
+    var ocean = L.tileLayer('$ocean_url', {maxZoom: 13, attribution: 'Tiles &copy; Esri'}).addTo(map);
+    var gray = L.tileLayer('$gray_url', {maxZoom: 13, attribution: 'Tiles &copy; Esri'});
+    L.control.layers({"Esri Ocean (Keyless)": ocean, "Esri Gray Canvas": gray}).addTo(map);
+    var polys = [$(join(poly_items, ","))];
+    polys.forEach(function(p) {
+      L.polygon(p.c, {color: p.k, fillColor: p.k, fillOpacity: 0.6, weight: 0.8})
+       .bindTooltip("$label: " + p.v).addTo(map);
+    });
+    </script></body></html>
+    """
+    write(output_file, html)
+    return String(output_file)
+end
+
+function _open_in_browser(path::AbstractString)::Bool
+    try
+        if Sys.iswindows()
+            run(`cmd /c start "" $(abspath(path))`; wait = false)
+            return true
+        elseif Sys.isapple()
+            run(`open $(abspath(path))`; wait = false)
+            return true
+        elseif Sys.islinux()
+            run(`xdg-open $(abspath(path))`; wait = false)
+            return true
+        end
+    catch
+    end
+    return false
+end
+
 function tessellation_preview(loaded, params)::String
-    mkpath(params.output_dir)
-    tess_path = joinpath(params.output_dir, "tessellation_polygons.html")
-    tess_map = plot_tessellation_map(
-        loaded.mesh;
+    out_dir = _resolve_output_dir(params.output_dir)
+    mkpath(out_dir)
+    tess_path = joinpath(out_dir, "tessellation_polygons.html")
+    _render_tessellation_html(
+        loaded.mesh, tess_path;
         title = "$(params.species_name) Tessellated Spatial Domain",
         depth = loaded.resharded_depths,
         hsi = loaded.hsi_vec,
-        dark_mode = params.dark_mode,
-        output_file = tess_path,
+        dark_mode = params.dark_mode
     )
-    show_map(tess_map; output_file = tess_path)
 
-    opened = open_in_browser(tess_path)
+    opened = _open_in_browser(tess_path)
     if params.verbose
         println("  Tessellation: $(loaded.mesh.n_units) units")
         println("  Grid polygon map: $tess_path")
@@ -1907,9 +2129,21 @@ function fit_movement_models(loaded, params)::NamedTuple
         verbose && println("  Sampling $(params.n_samples) draws " *
                           " (discarding $(params.n_warmup) warmup)...")
         chn = sample(rng, m_tel, spl, params.n_samples; num_warmup = params.n_warmup, progress = false)
-                chains[:telemetry] = chn
+        chains[:telemetry] = chn
         report_chain_health("telemetry", chn, params)
         verbose && println("  Pure telemetry model complete.")
+
+        # Separate fishery-independent Acoustic (OTN) vs. Commercial Trap (BIO) inference
+        if hasproperty(obs_df, :datasource)
+            ds_low = String[lowercase(strip(string(v))) for v in obs_df.datasource]
+            idx_otn = findall(==("otn"), ds_low)
+            idx_bio = findall(==("bio"), ds_low)
+            if length(idx_otn) >= 10 && length(idx_bio) >= 10
+                fit_datasource_stratified_kernels!(
+                    models, chains, loaded, params, idx_otn, idx_bio, rng
+                )
+            end
+        end
     end
 
 # -- Joint Survey + Telemetry Model --------------------------------------
@@ -1953,6 +2187,117 @@ function fit_movement_models(loaded, params)::NamedTuple
         verbose && println("  Joint model complete.")
     end
 
+    return (models = models, chains = chains)
+end
+
+function _empirical_trap_effort_weights(
+    obs_df::DataFrame,
+    idx_bio::Vector{Int},
+    W::SparseMatrixCSC,
+    land_mask::Union{Nothing, AbstractVector{Bool}} = nothing
+)::Vector{Float64}
+    S = size(W, 1)
+    counts = zeros(Float64, S)
+    for i in idx_bio
+        u1 = Int(obs_df.release[i])
+        u2 = Int(obs_df.recapture[i])
+        1 <= u1 <= S && (counts[u1] += 1.0)
+        1 <= u2 <= S && (counts[u2] += 1.0)
+    end
+    rows = rowvals(W)
+    smoothed = Vector{Float64}(undef, S)
+    for u in 1:S
+        (land_mask !== nothing && land_mask[u]) && (smoothed[u] = 0.05; continue)
+        nb_sum = counts[u]
+        nb_cnt = 1
+        for ptr in nzrange(W, u)
+            v = rows[ptr]
+            v == u && continue
+            (land_mask !== nothing && land_mask[v]) && continue
+            nb_sum += counts[v]
+            nb_cnt += 1
+        end
+        smoothed[u] = nb_sum / nb_cnt
+    end
+    cmax = maximum(smoothed; init = 0.0)
+    cmax <= 0.0 && return ones(Float64, S)
+    return Float64[0.05 + 0.95 * (smoothed[u] / cmax) for u in 1:S]
+end
+
+"""
+    fit_datasource_stratified_kernels(loaded, params) -> NamedTuple
+
+Fits separate Bayesian movement transition kernels for fishery-independent OTN
+acoustic receiver detections (`datasource == "otn"`) and commercial pot-trap
+recaptures (`datasource == "bio"`, incorporating a smoothed pot-haul effort offset).
+"""
+function fit_datasource_stratified_kernels!(
+    models::Dict{Symbol, Any},
+    chains::Dict{Symbol, Any},
+    loaded::NamedTuple,
+    params,
+    idx_otn::Vector{Int},
+    idx_bio::Vector{Int},
+    rng::AbstractRNG = MersenneTwister(params.seed + 101)
+)
+    verbose = params.verbose
+    obs_df  = loaded.obs_df
+    n_s     = size(loaded.W, 1)
+    spl     = movement_sampler(POPULATION_PRIOR_SCALES, params)
+    n_sub   = max(10, min(params.n_samples, 300))
+    n_warm  = max(0, min(params.n_warmup, 80))
+
+    verbose && println(
+        "\n[Phase 2-DS] Fitting stratified Acoustic (OTN, n=$(length(idx_otn))) vs. " *
+        "Commercial Trap (BIO, n=$(length(idx_bio))) models..."
+    )
+
+    rel_otn = Int.(obs_df.release[idx_otn])
+    rec_otn = Int.(obs_df.recapture[idx_otn])
+    ks_otn  = max.(1, Int.(round.(obs_df.k[idx_otn])))
+    validate_mark_recapture_indices(rel_otn, rec_otn, n_s)
+    m_otn = pure_telemetry_turing_model(
+        rel_otn, rec_otn, ks_otn, loaded.W, loaded.hsi_vec, loaded.land_mask
+    )
+    models[:telemetry_otn] = m_otn
+    chn_otn = sample(rng, m_otn, spl, n_sub; num_warmup = n_warm, progress = false)
+    chains[:telemetry_otn] = chn_otn
+    report_chain_health("telemetry_otn (acoustic)", chn_otn, params)
+
+    effort_bio = _empirical_trap_effort_weights(
+        obs_df, idx_bio, sparse(loaded.W), loaded.land_mask
+    )
+    rel_bio = Int.(obs_df.release[idx_bio])
+    rec_bio = Int.(obs_df.recapture[idx_bio])
+    ks_bio  = max.(1, Int.(round.(obs_df.k[idx_bio])))
+    validate_mark_recapture_indices(rel_bio, rec_bio, n_s)
+    m_bio = pure_telemetry_turing_model(
+        rel_bio, rec_bio, ks_bio, loaded.W, loaded.hsi_vec, loaded.land_mask, effort_bio
+    )
+    models[:telemetry_bio] = m_bio
+    chn_bio = sample(rng, m_bio, spl, n_sub; num_warmup = n_warm, progress = false)
+    chains[:telemetry_bio] = chn_bio
+    report_chain_health("telemetry_bio (commercial trap)", chn_bio, params)
+    return (otn = chn_otn, bio = chn_bio)
+end
+
+function fit_datasource_stratified_kernels(loaded::NamedTuple, params)
+    models = Dict{Symbol, Any}()
+    chains = Dict{Symbol, Any}()
+    obs_df = loaded.obs_df
+    hasproperty(obs_df, :datasource) || throw(ArgumentError(
+        "obs_df has no :datasource column for acoustic vs. trap stratification."
+    ))
+    ds_low = String[lowercase(strip(string(v))) for v in obs_df.datasource]
+    idx_otn = findall(==("otn"), ds_low)
+    idx_bio = findall(==("bio"), ds_low)
+    (isempty(idx_otn) || isempty(idx_bio)) && throw(DomainError(
+        (length(idx_otn), length(idx_bio)),
+        "Both 'otn' and 'bio' records are required for stratified fitting."
+    ))
+    fit_datasource_stratified_kernels!(
+        models, chains, loaded, params, idx_otn, idx_bio, MersenneTwister(params.seed + 101)
+    )
     return (models = models, chains = chains)
 end
 
@@ -2050,18 +2395,26 @@ because both fail silently if missed:
     trailing singleton axis, which needs unwrapping before it is numeric.
 """
 function posterior_kernel_draws(chain)
-    n_draws = max(1, size(Array(chain), 1))
+    n_draws = if chain isa AbstractDict
+        max(1, maximum(v -> v isa AbstractArray ? size(v, 1) : 1, values(chain); init = 1))
+    else
+        max(1, size(Array(chain), 1))
+    end
 
     # Chain keys are not plain names: the sampler wraps each one as
-    # `Parameter(name)` or `Extra(name)`, so matching on the raw key would both
-    # fail and pick up the internal bookkeeping columns.
+    # `Parameter(name)` or `Extra(name)` (or sanitized `Parameter_name_` in Zarr).
     function parname(key)
         s = string(key)
         open = findfirst('(', s)
-        open === nothing && return s
         close = findlast(')', s)
-        close === nothing && return s
-        return s[(open + 1):(close - 1)]
+        if open !== nothing && close !== nothing && close > open
+            inner = s[(open + 1):(close - 1)]
+            return startswith(inner, ':') ? inner[2:end] : inner
+        end
+        if startswith(s, "Parameter_")
+            return chop(s[11:end]; tail = endswith(s, '_') ? 1 : 0)
+        end
+        return s
     end
     lookup = Dict{String,Any}(parname(k) => k for k in keys(chain))
 
@@ -2246,18 +2599,110 @@ function extract_transition_kernels(loaded, fitted, params)::NamedTuple
                   "rho range $(round(minimum(residency); digits = 3))..$(round(maximum(residency); digits = 3))")
       end
 
-    return (
-        P_kernel        = P_kernel,
-        grp_name_lookup = Dict{Int, String}(),
-        alpha_hat       = alpha_hat,
-        rho_hat         = rho_hat,
-        gamma_hat       = g_mean,
-        G               = 1,
-        alpha_samples   = alpha_samples,
-        rho_samples     = rho_samples,
-        gamma_samples   = gamma_samples,
-        active_chain    = active_chain,
+    datasource_summary = _summarize_datasource_posteriors(
+        loaded, chains, params, alpha_samples, rho_samples, gamma_samples
     )
+
+    return (
+        P_kernel           = P_kernel,
+        grp_name_lookup    = Dict{Int, String}(),
+        alpha_hat          = alpha_hat,
+        rho_hat            = rho_hat,
+        gamma_hat          = g_mean,
+        G                  = 1,
+        alpha_samples      = alpha_samples,
+        rho_samples        = rho_samples,
+        gamma_samples      = gamma_samples,
+        active_chain       = active_chain,
+        datasource_summary = datasource_summary,
+    )
+end
+
+function _summarize_datasource_posteriors(
+    loaded::NamedTuple,
+    chains::Dict,
+    params,
+    pooled_a::AbstractVector{<:Real},
+    pooled_r::AbstractVector{<:Real},
+    pooled_g::AbstractVector{<:Real}
+)
+    obs_df = loaded.obs_df
+    step_yr = _step_years(params, loaded)
+    mean_step_km = _mean_neighbor_step_km(loaded)
+    cents_ll = hasproperty(loaded.mesh, :centroids_lonlat) ?
+        loaded.mesh.centroids_lonlat : nothing
+
+    function _emp_metrics(idxs::Vector{Int})
+        isempty(idxs) && return (0, 0, 0.0, 0.0, 0.0)
+        n_o = length(idxs)
+        n_t = length(unique(obs_df.tagid[idxs]))
+        disps = Float64[]
+        n_stat = 0
+        for i in idxs
+            u1 = Int(obs_df.release[i])
+            u2 = Int(obs_df.recapture[i])
+            u1 == u2 && (n_stat += 1)
+            if cents_ll !== nothing && 1 <= u1 <= length(cents_ll) && 1 <= u2 <= length(cents_ll)
+                c1, c2 = cents_ll[u1], cents_ll[u2]
+                push!(disps, haversine_distance(
+                    Float64(c1[1]), Float64(c1[2]), Float64(c2[1]), Float64(c2[2])
+                ) / 1000.0)
+            else
+                push!(disps, 0.0)
+            end
+        end
+        return (n_o, n_t, 100.0 * n_stat / n_o, median(disps), mean(disps))
+    end
+
+    function _row_from_draws(lbl::String, idxs::Vector{Int}, a_v, r_v, g_v)
+        n_o, n_t, pct_st, med_d, mn_d = _emp_metrics(idxs)
+        am, rm, gm = mean(a_v), mean(r_v), mean(g_v)
+        alo, ahi = length(a_v) >= 2 ? (quantile(a_v, 0.025), quantile(a_v, 0.975)) : (am, am)
+        rlo, rhi = length(r_v) >= 2 ? (quantile(r_v, 0.025), quantile(r_v, 0.975)) : (rm, rm)
+        glo, ghi = length(g_v) >= 2 ? (quantile(g_v, 0.025), quantile(g_v, 0.975)) : (gm, gm)
+        v_eff = (1.0 - rm) * mean_step_km / step_yr
+        d_eff = (1.0 - rm) * (1.0 - am) * (mean_step_km^2) / (4.0 * step_yr)
+        return (
+            stratum          = lbl,
+            n_obs            = n_o,
+            n_tags           = n_t,
+            pct_stationary   = pct_st,
+            median_disp_km   = med_d,
+            mean_disp_km     = mn_d,
+            alpha_mean       = am,
+            alpha_ci_lo      = alo,
+            alpha_ci_hi      = ahi,
+            rho_mean         = rm,
+            rho_ci_lo        = rlo,
+            rho_ci_hi        = rhi,
+            gamma_mean       = gm,
+            gamma_ci_lo      = glo,
+            gamma_ci_hi      = ghi,
+            eff_speed_km_yr  = v_eff,
+            eff_diff_km2_yr  = d_eff,
+        )
+    end
+
+    rows = NamedTuple[]
+    push!(rows, _row_from_draws("Pooled All", collect(1:nrow(obs_df)), pooled_a, pooled_r, pooled_g))
+
+    if hasproperty(obs_df, :datasource)
+        ds_low = String[lowercase(strip(string(v))) for v in obs_df.datasource]
+        for (ckey, dkey, lbl) in [
+            (:telemetry_otn, "otn", "Acoustic Array (OTN)"),
+            (:telemetry_bio, "bio", "Commercial Trap (BIO, effort-offset)")
+        ]
+            idxs = findall(==(dkey), ds_low)
+            isempty(idxs) && continue
+            if haskey(chains, ckey) && chains[ckey] !== nothing
+                vd, dd, gd = posterior_kernel_draws(chains[ckey])
+                as, rs = movement_alpha_rho(vd, dd)
+                push!(rows, _row_from_draws(lbl, idxs, as, rs, gd))
+            end
+        end
+    end
+
+    return DataFrame(rows)
 end
 
 # =============================================================================
@@ -2287,6 +2732,143 @@ bottleneck detection:
 `NamedTuple` with: `paths`, `corridors`, `stochastic_paths`,
 `domain_bottlenecks`, `cents_planar`, `cents_lonlat`, `cents_mesh`.
 """
+function _dedup_consecutive_nodes(seq::AbstractVector{<:Integer})::Vector{Int}
+    isempty(seq) && return Int[]
+    out = Int[Int(seq[1])]
+    for k in 2:length(seq)
+        u = Int(seq[k])
+        u != out[end] && push!(out, u)
+    end
+    return out
+end
+
+function _select_stratified_tags(
+    obs_df::DataFrame,
+    max_paths::Int,
+    cents_lonlat
+)::Vector{String}
+    all_tags = String.(unique(obs_df.tagid))
+    n_total = length(all_tags)
+    n_sample = min(max(1, max_paths), n_total)
+    n_sample >= n_total && return all_tags
+
+    # Rank tags by (release_unit, max_displacement_km) so an evenly spaced stride
+    # samples uniformly across all release regions and movement regimes.
+    tag_meta = Dict{String, Tuple{Int, Float64}}()
+    for row in eachrow(obs_df)
+        tid = string(row.tagid)
+        u_rel = Int(row.release)
+        u_rec = Int(row.recapture)
+        d_km = if u_rel != u_rec && cents_lonlat !== nothing &&
+                  1 <= u_rel <= length(cents_lonlat) && 1 <= u_rec <= length(cents_lonlat)
+            c1 = cents_lonlat[u_rel]
+            c2 = cents_lonlat[u_rec]
+            haversine_distance(
+                Float64(c1[1]), Float64(c1[2]), Float64(c2[1]), Float64(c2[2])
+            ) / 1000.0
+        else
+            0.0
+        end
+        prev = get(tag_meta, tid, (u_rel, -1.0))
+        if d_km > prev[2]
+            tag_meta[tid] = (prev[2] < 0.0 ? u_rel : prev[1], d_km)
+        end
+    end
+
+    sorted_tags = sort(all_tags; by = t -> get(tag_meta, t, (0, 0.0)))
+    idxs = unique(round.(Int, range(1, n_total; length = n_sample)))
+    return sorted_tags[idxs]
+end
+
+function _interval_mean_hsi(
+    loaded,
+    t_rel::Real,
+    k_steps::Int,
+    step_yr::Float64
+)::Vector{Float64}
+    isnan(t_rel) && return loaded.hsi_vec
+    mhsi = loaded.monthly_hsi
+    mlup = loaded.month_lookup
+    (isempty(mhsi) || isempty(mlup)) && return loaded.hsi_vec
+
+    dur_yr = max(0.0, k_steps * step_yr)
+    n_mo = clamp(ceil(Int, dur_yr * 12.0) + 1, 1, 24)
+    acc = zeros(Float64, size(mhsi, 1))
+    n_hit = 0
+    for m_idx in 0:(n_mo - 1)
+        t_cur = Float64(t_rel) + (m_idx / 12.0)
+        yr = floor(Int, t_cur)
+        mo = clamp(Int(fld((t_cur - yr) * 12.0, 1.0)) + 1, 1, 12)
+        col = get(mlup, (yr, mo), nothing)
+        if col !== nothing && 1 <= col <= size(mhsi, 2)
+            acc .+= @view(mhsi[:, col])
+            n_hit += 1
+        end
+    end
+    n_hit == 0 && return _resolve_hsi_for_time(loaded, t_rel)
+    acc ./= n_hit
+    return acc
+end
+
+function _sparse_bridge_transit_density(
+    P::AbstractMatrix{<:Real},
+    release::Int,
+    recapture::Int,
+    k::Int;
+    land_mask = nothing
+)::Vector{Float64}
+    S = size(P, 1)
+    out = zeros(Float64, S)
+    (!(1 <= release <= S) || !(1 <= recapture <= S) || release == recapture) && return out
+
+    K = clamp(k, 2, 365)
+    P_sp = P isa SparseMatrixCSC ? P : sparse(Float64.(P))
+    Pt_sp = sparse(P_sp')
+
+    f_vecs = Vector{Vector{Float64}}(undef, K + 1)
+    f0 = zeros(Float64, S)
+    f0[release] = 1.0
+    f_vecs[1] = f0
+    for tau in 1:K
+        nxt = Pt_sp * f_vecs[tau]
+        s = sum(nxt)
+        s > 0.0 && (nxt ./= s)
+        f_vecs[tau + 1] = nxt
+    end
+
+    b_vecs = Vector{Vector{Float64}}(undef, K + 1)
+    bK = zeros(Float64, S)
+    bK[recapture] = 1.0
+    b_vecs[K + 1] = bK
+    for tau in K:-1:1
+        prv = P_sp * b_vecs[tau + 1]
+        s = sum(prv)
+        s > 0.0 && (prv ./= s)
+        b_vecs[tau] = prv
+    end
+
+    # Average interior bridge marginals tau = 1..(K-1) so pinned release/recapture
+    # delta spikes at tau = 0 and tau = K do not mask transit corridors.
+    n_int = 0
+    buf = zeros(Float64, S)
+    for tau in 1:(K - 1)
+        col = tau + 1
+        csum = 0.0
+        @inbounds for u in 1:S
+            val = (land_mask !== nothing && Bool(land_mask[u])) ?
+                0.0 : f_vecs[col][u] * b_vecs[col][u]
+            buf[u] = val
+            csum += val
+        end
+        if csum > 1e-30
+            out .+= buf ./ csum
+            n_int += 1
+        end
+    end
+    n_int > 0 && (out ./= n_int)
+    return out
+end
+
 function reconstruct_paths_and_diagnostics(
     loaded, kernels, params
 )::NamedTuple
@@ -2295,86 +2877,48 @@ function reconstruct_paths_and_diagnostics(
     W           = loaded.W
     hsi_vec     = loaded.hsi_vec
     land_mask   = loaded.land_mask
-      n_spatial   = loaded.n_spatial
-      P_kernel    = kernels.P_kernel
-      G           = 1
-      grp_nlookup = Dict{Int, String}()
+    n_spatial   = loaded.n_spatial
+    P_kernel    = kernels.P_kernel
+    G           = 1
+    step_yr     = _step_years(params, loaded)
 
     cents_planar, cents_lonlat, cents_mesh =
         _resolve_centroids(loaded.mesh, n_spatial)
 
     all_tags    = unique(obs_df.tagid)
-    n_sample    = min(params.max_paths, length(all_tags))
-    sample_tags = all_tags[1:n_sample]
+    sample_tags = _select_stratified_tags(obs_df, params.max_paths, cents_lonlat)
+    n_sample    = length(sample_tags)
 
     verbose && println(
         "\n[Phase 4] Reconstructing $(join(string.(params.path_methods), ", ")) trajectories " *
-        "for $n_sample / $(length(all_tags)) individuals..."
+        "for $n_sample / $(length(all_tags)) spatially stratified individuals..."
     )
 
-    max_k_dyn = 0
-if params.dynamic_kernels
-        for tid in sample_tags
-            sub_obs = filter(:tagid => ==(tid), obs_df)
-            isempty(sub_obs) && continue
-            max_k_dyn = max(max_k_dyn, first(sub_obs).k)
-        end
-    end
+    land_polys = isempty(params.land_polygon_files) ? nothing :
+        reduce(vcat, read_polygon_file.(params.land_polygon_files))
 
-    P_dyn_seq_cache = nothing
-    if max_k_dyn > 0
-        hsi_dyn_all = if params.use_geodata_habitat && cents_lonlat !== nothing
-            verbose && println(
-                "  Computing $(max_k_dyn)-step dynamic seasonal HSI field from $(params.temperature_source)..."
-            )
-            min_lon = minimum(c[1] for c in cents_lonlat)
-            max_lon = maximum(c[1] for c in cents_lonlat)
-            min_lat = minimum(c[2] for c in cents_lonlat)
-            max_lat = maximum(c[2] for c in cents_lonlat)
-            mesh_polys = (params.spatial_averaging != "centroid" &&
-                          hasproperty(loaded.mesh, :polygons_lonlat)) ?
-                         loaded.mesh.polygons_lonlat : nothing
-            months_seq = [mod1(params.temperature_month == 0 ? t : params.temperature_month + t - 1, 12)
-                          for t in 1:max_k_dyn]
-            hsi_mat = build_dynamic_geodata_hsi_series(
-                cents_lonlat;
-                polygons           = mesh_polys,
-                lon_range          = (min_lon, max_lon),
-                lat_range          = (min_lat, max_lat),
-                months             = months_seq,
-                temperature_source = params.temperature_source,
-                verbose            = false
-            )
-            [hsi_mat[:, t] for t in 1:max_k_dyn]
-        else
-            [
-                clamp.(hsi_vec .+ 0.05 * sin(t * π / 2), 0.01, 1.0)
-                for t in 1:max_k_dyn
-            ]
-        end
-        P_dyn_seq_cache = construct_dynamic_transition_kernels(
-            W, hsi_dyn_all; land_mask = land_mask
-        )
-    end
-
-    P_seg_cache = Dict{Tuple{Float64, Int}, Any}()
+    P_seg_cache = Dict{Tuple{Int, Int, Int}, SparseMatrixCSC{Float64, Int}}()
+    P_base_sp = P_kernel isa SparseMatrixCSC ? P_kernel : sparse(Float64.(P_kernel))
 
     reconstructed_paths     = Dict{String, Vector{Int}}()
-    reconstructed_corridors = Dict{String, Matrix{Float64}}()
+    reconstructed_corridors = Dict{String, Vector{Float64}}()
     stochastic_paths        = Dict{String, Any}()
     forward_ibm_paths       = Dict{String, Vector{Int}}()
+
+    _group_param(x, g::Int) = x isa AbstractVector ?
+        ((1 <= g <= length(x)) ? x[g] : throw(BoundsError(x, g))) : x
+
+    chosen_method = isempty(params.path_methods) ? :bridge : first(params.path_methods)
 
     for tid in sample_tags
         sub_obs = filter(:tagid => ==(tid), obs_df)
         isempty(sub_obs) && continue
 
-        grp = hasproperty(sub_obs, :group) ? first(sub_obs.group) : 1
-        P_k = P_kernel isa AbstractVector ?
-              P_kernel[clamp(grp, 1, length(P_kernel))] : P_kernel
+        grp = hasproperty(sub_obs, :group) ? Int(first(sub_obs.group)) : 1
+        P_k = _group_param(P_kernel, grp)
+        P_k_sp = P_k isa SparseMatrixCSC ? P_k : P_base_sp
 
-        # Concatenate multi-segment trajectories for this individual
         full_path = if params.hmm_smoothing && nrow(sub_obs) > 1
-            # Global multi-segment Hidden Markov Model Viterbi smoothing
             times = Int[1]
             cum_t = 1
             locs = Any[sub_obs.release[1]]
@@ -2384,188 +2928,109 @@ if params.dynamic_kernels
                 push!(locs, r.recapture)
             end
             res_hmm = viterbi_hmm_path_smoothing(
-                times, locs, P_k;
+                times, locs, P_k_sp;
                 mesh = loaded.mesh, land_mask = land_mask
             )
-            res_hmm.path
+            _dedup_consecutive_nodes(res_hmm.path)
         else
             fpath = Int[sub_obs.release[1]]
-            for row in eachrow(sub_obs)
-                # Select the monthly HSI slice for this segment's release time
-                t_rel  = hasproperty(row, :rel_time) ? row.rel_time : NaN
-                hsi_row = isnan(t_rel) ? hsi_vec :
-                          _resolve_hsi_for_time(loaded, t_rel)
-
-                # Build a segment-specific kernel if HSI differs from the
-                # pre-computed P_k (time-varying case)
-                P_seg = if hsi_row === hsi_vec
-                    P_k
+            for (seg_idx, row) in enumerate(eachrow(sub_obs))
+                k_seg = max(1, Int(row.k))
+                t_rel = hasproperty(row, :rel_time) ? Float64(row.rel_time) : NaN
+                hsi_row = if params.dynamic_kernels && !isnan(t_rel)
+                    _interval_mean_hsi(loaded, t_rel, k_seg, step_yr)
+                elseif !isnan(t_rel)
+                    _resolve_hsi_for_time(loaded, t_rel)
                 else
-                    get!(P_seg_cache, (Float64(t_rel), grp)) do
-                        a_hat = kernels.alpha_hat isa AbstractVector ?
-                            kernels.alpha_hat[clamp(grp, 1, length(kernels.alpha_hat))] :
-                            kernels.alpha_hat
-                        r_hat = kernels.rho_hat isa AbstractVector ?
-                            kernels.rho_hat[clamp(grp, 1, length(kernels.rho_hat))] :
-                            kernels.rho_hat
-                        g_hat = kernels.gamma_hat isa AbstractVector ?
-                            kernels.gamma_hat[clamp(grp, 1, length(kernels.gamma_hat))] :
-                            kernels.gamma_hat
-                        construct_stochastic_transition_kernel(
+                    hsi_vec
+                end
+
+                P_seg = if hsi_row === hsi_vec
+                    P_k_sp
+                else
+                    yr_k = isnan(t_rel) ? 0 : round(Int, t_rel * 12.0)
+                    mo_span = clamp(ceil(Int, k_seg * step_yr * 12.0), 1, 24)
+                    get!(P_seg_cache, (yr_k, mo_span, grp)) do
+                        a_hat = _group_param(kernels.alpha_hat, grp)
+                        r_hat = _group_param(kernels.rho_hat, grp)
+                        g_hat = _group_param(kernels.gamma_hat, grp)
+                        sparse(construct_stochastic_transition_kernel(
                             W, hsi_row;
                             gamma     = g_hat,
                             residence = r_hat,
                             advection = a_hat,
                             land_mask = land_mask
-                        )
+                        ))
                     end
                 end
 
-                k_seg = max(1, row.k)
-                seg = if params.dynamic_kernels && P_dyn_seq_cache !== nothing && length(P_dyn_seq_cache) >= k_seg
-                    # Dynamic time-varying HSI routing: evaluate cost with time-varying fields
-                    chosen_method = first(params.path_methods)
-                    if chosen_method == :astar && cents_mesh !== nothing
-                        dynamic_astar_least_cost_path(
-                            cents_mesh, W, row.release, row.recapture, k_seg;
-                            hsi_series = hsi_dyn_all[1:k_seg],
-                            land_mask  = land_mask
-                        )
-                    else
-                        dyn_meth = chosen_method == :viterbi ? :viterbi : :deterministic
-                        predict_dynamic_path(
-                            P_dyn_seq_cache[1:k_seg], row.release, row.recapture;
-                            centroids = cents_mesh,
-                            method    = dyn_meth,
-                            land_mask = land_mask
-                        )
-                    end
-                elseif hasproperty(loaded.mesh, :is_fine)
-                    astar_multiresolution_path(
-                        loaded.mesh, row.release, row.recapture;
-                        hsi = hsi_row, land_mask = land_mask
+                rng_seg = MersenneTwister(hash((string(tid), seg_idx, params.seed)))
+                seg = predict_path(
+                    P_seg, row.release, row.recapture, k_seg;
+                    centroids = cents_mesh,
+                    method    = chosen_method,
+                    land_mask = land_mask,
+                    rng       = rng_seg
+                )
+                if isempty(seg)
+                    verbose && println(
+                        "  $tid segment $seg_idx/$(nrow(sub_obs)): no marine route " *
+                        "from $(row.release) to $(row.recapture); dropped."
                     )
-                else
-                    predict_path(
-                        P_seg, row.release, row.recapture, row.k;
-                        centroids = cents_mesh,
-                        method    = first(params.path_methods),
-                        land_mask = land_mask
-                    )
+                elseif length(seg) >= 2
+                    append!(fpath, seg[2:end])
                 end
-                # The router returns an empty vector when no exact-k route
-                  # exists, rather than padding one. Drop the event and say so:
-                  # appending a fabricated segment would misattribute movement.
-                  isempty(seg) && (verbose && println(
-                      "  $(tid) segment $(n)/$(nrow(sub_obs)): no exact-$(row.k)-step " *
-                      "route from $(row.release) to $(row.recapture); dropped."))
-                  append!(fpath, seg[2:end])
             end
-            fpath
+            _dedup_consecutive_nodes(fpath)
         end
-        if params.smooth_paths && cents_mesh !== nothing
-            full_path = smooth_marine_path(full_path, cents_mesh)
+
+        if params.smooth_paths && cents_mesh !== nothing && land_polys !== nothing
+            full_path = smooth_marine_path(
+                full_path, cents_mesh;
+                land_polygons = land_polys,
+                centroids_lonlat = cents_lonlat
+            )
         end
         reconstructed_paths[string(tid)] = full_path
 
-        # Generate unconditioned forward IBM path
-        fwd_ibm = simulate_forward_ibm(P_k, first(sub_obs).release, sum(sub_obs.k); land_mask=land_mask)
-        forward_ibm_paths[string(tid)] = fwd_ibm
-
-        # Markov bridge corridor heatmap for the first segment
-        first_row = first(sub_obs)
-        t_rel_first = hasproperty(first_row, :rel_time) ? first_row.rel_time : NaN
-        hsi_first   = isnan(t_rel_first) ? hsi_vec :
-                      _resolve_hsi_for_time(loaded, t_rel_first)
-        prop_hsi  = params.propagate_hsi_error && params.hsi_se > 0.0
-        n_hsi_m   = prop_hsi ? min(params.n_stochastic_draws, 5) : 1
-
-        corr_accum = nothing
-        for d in 1:n_hsi_m
-            P_eval = if prop_hsi && d > 1
-                rng_d = MersenneTwister(
-                    params.seed + abs(hash(string(tid))) % 10_000 + d
-                )
-                hsi_d = clamp.(
-                    hsi_first .+ randn(rng_d, n_spatial) .* params.hsi_se,
-                    0.001, 1.0
-                )
-                a_hat = kernels.alpha_hat isa AbstractVector ?
-                        kernels.alpha_hat[clamp(grp, 1, length(kernels.alpha_hat))] :
-                        kernels.alpha_hat
-                r_hat = kernels.rho_hat isa AbstractVector ?
-                        kernels.rho_hat[clamp(grp, 1, length(kernels.rho_hat))] :
-                        kernels.rho_hat
-                g_hat = kernels.gamma_hat isa AbstractVector ?
-                        kernels.gamma_hat[clamp(grp, 1, length(kernels.gamma_hat))] :
-                        kernels.gamma_hat
-                construct_stochastic_transition_kernel(
-                    W, hsi_d;
-                    gamma     = g_hat,
-                    residence = r_hat,
-                    advection = a_hat,
-                    land_mask = land_mask
-                )
-            else
-                P_k
-            end
-            corr_d = if params.dynamic_kernels
-                k_val = max(1, first_row.k)
-                P_dyn_seq = P_dyn_seq_cache[1:k_val]
-                predict_dynamic_corridor(
-                    P_dyn_seq, first_row.release, first_row.recapture;
-                    land_mask = land_mask
-                )
-            else
-                predict_corridor(
-                    P_eval, first_row.release, first_row.recapture,
-                    first_row.k; land_mask = land_mask
-                )
-            end
-            if corr_accum === nothing
-                corr_accum = zeros(Float64, size(corr_d)...)
-            end
-            corr_accum .+= corr_d
-        end
-        reconstructed_corridors[string(tid)] = corr_accum ./ n_hsi_m
-
-        # Optional stochastic least-cost path ensemble
-        if wants_diagnostic(params, :stochastic) && cents_planar !== nothing
-            try
-                stoch_res = astar_stochastic_least_cost_path(
-                    cents_planar, W,
-                    first_row.release, first_row.recapture;
-                    hsi_mean         = hsi_vec,
-                    hsi_se           = fill(params.hsi_se, n_spatial),
-                    n_draws          = params.n_stochastic_draws,
-                    friction_power   = 2.0,
-                    land_mask        = land_mask,
-                    centroids_lonlat = cents_lonlat,
-                    smooth           = params.smooth_paths,
-                    structural_uncertainty = params.add_structural_uncertainty,
-                    structural_uncertainty_scale = params.structural_uncertainty_scale,
-                    seed             = Int(
-                        params.seed + abs(hash(string(tid))) % 10_000
-                    )
-                )
-                stochastic_paths[string(tid)] = stoch_res
-                d = stoch_res.mean_distance
-                dist_km = d > 10_000.0 ? d / 1_000.0 : d
-                verbose && println(
-                    "  Tag $tid stochastic: " *
-                    "$(length(stoch_res.medoid_path)) hops, " *
-                    "$(round(dist_km; digits=1)) km"
-                )
-            catch e
-                _record_panel_skip("Stochastic A* [$tid]", e); verbose && println("  (Stochastic A* note [$tid]: $e)")
-            end
-        end
-
-          verbose && println(
-              "  Tag $tid: " *
-              "$(length(full_path)) units " *
-              "($(first(full_path)) -> $(last(full_path)))"
+        # Unconditioned forward IBM comparison trajectory
+        fwd_ibm = simulate_forward_ibm(
+            P_k_sp, first(sub_obs).release, min(sum(sub_obs.k), 365);
+            land_mask = land_mask
         )
+        forward_ibm_paths[string(tid)] = _dedup_consecutive_nodes(fwd_ibm)
+
+        # Markov-bridge interior transit corridor across non-stationary segments
+        corr_accum = zeros(Float64, n_spatial)
+        n_active_seg = 0
+        for row in eachrow(sub_obs)
+            row.release == row.recapture && continue
+            k_seg = max(2, Int(row.k))
+            t_rel = hasproperty(row, :rel_time) ? Float64(row.rel_time) : NaN
+            hsi_seg = !isnan(t_rel) ? _interval_mean_hsi(loaded, t_rel, k_seg, step_yr) : hsi_vec
+            P_c = if hsi_seg === hsi_vec
+                P_k_sp
+            else
+                yr_k = round(Int, t_rel * 12.0)
+                mo_span = clamp(ceil(Int, k_seg * step_yr * 12.0), 1, 24)
+                get(P_seg_cache, (yr_k, mo_span, grp), P_k_sp)
+            end
+            corr_accum .+= _sparse_bridge_transit_density(
+                P_c, row.release, row.recapture, k_seg;
+                land_mask = land_mask
+            )
+            n_active_seg += 1
+        end
+        if n_active_seg > 0
+            corr_accum ./= n_active_seg
+        end
+        reconstructed_corridors[string(tid)] = corr_accum
+    end
+
+    if verbose
+        n_multi = count(p -> length(p) >= 2, values(reconstructed_paths))
+        max_hops = isempty(reconstructed_paths) ? 0 : maximum(length, values(reconstructed_paths)) - 1
+        println("  Reconstructed $n_sample trajectories ($n_multi non-stationary, max $max_hops marine hex hops).")
     end
 
     # -- 4b. Domain-Wide Posterior Averaging & Bottleneck Detection ----------
@@ -2573,64 +3038,93 @@ if params.dynamic_kernels
 
     if wants_diagnostic(params, :bottlenecks) && cents_planar !== nothing
         verbose && println("\n[Phase 4b] Domain bottleneck detection...")
-        n_obs              = nrow(obs_df)
-        tag_sample_indices = Int[]
+        n_obs = nrow(obs_df)
 
-        if G > 1 && hasproperty(obs_df, :group)
-            for g in 1:G
-                cand = findall(
-                    i -> obs_df.group[i] == g &&
-                         obs_df.release[i] != obs_df.recapture[i] &&
-                         (land_mask === nothing ||
-                          (!land_mask[obs_df.release[i]] &&
-                           !land_mask[obs_df.recapture[i]])),
-                    1:n_obs
-                )
-                n_take = min(10, length(cand))
-                n_take > 0 && append!(tag_sample_indices, cand[1:n_take])
+        # Group all non-stationary marine observations into unique (release, recapture)
+        # origin-destination pairs so every shelf sector is represented without a single
+        # pot haul swamping shelf-wide corridors.
+        pair_counts = Dict{Tuple{Int, Int}, Int}()
+        for i in 1:n_obs
+            u_rel = Int(obs_df.release[i])
+            u_rec = Int(obs_df.recapture[i])
+            u_rel == u_rec && continue
+            if land_mask !== nothing && (land_mask[u_rel] || land_mask[u_rec])
+                continue
             end
-        else
-            cand = findall(
-                i -> obs_df.release[i] != obs_df.recapture[i] &&
-                     (land_mask === nothing ||
-                      (!land_mask[obs_df.release[i]] &&
-                       !land_mask[obs_df.recapture[i]])),
-                1:n_obs
-            )
-            n_take = min(25, length(cand))
-            n_take > 0 && append!(tag_sample_indices, cand[1:n_take])
+            pair_counts[(u_rel, u_rec)] = get(pair_counts, (u_rel, u_rec), 0) + 1
         end
-        isempty(tag_sample_indices) &&
-            append!(tag_sample_indices, collect(1:min(10, n_obs)))
+
+        unique_pairs = sort!(collect(keys(pair_counts)))
+        max_od_pairs = max(350, params.max_paths)
+        eval_pairs = if length(unique_pairs) <= max_od_pairs
+            unique_pairs
+        else
+            p_idxs = unique(round.(Int, range(1, length(unique_pairs); length = max_od_pairs)))
+            unique_pairs[p_idxs]
+        end
 
         verbose && println(
-            "  Aggregating $(length(tag_sample_indices)) events..."
+            "  Aggregating $(length(eval_pairs)) / $(length(unique_pairs)) unique " *
+            "origin-destination movement pairs across $n_obs observations..."
         )
 
         C_domain = zeros(Float64, n_spatial)
-        C_events = zeros(Float64, length(tag_sample_indices), n_spatial)
+        C_events = zeros(Float64, max(1, length(eval_pairs)), n_spatial)
         F_domain = spzeros(Float64, n_spatial, n_spatial)
-        hsi_se_v = fill(params.hsi_se, n_spatial)
 
-        for (e_idx, idx) in enumerate(tag_sample_indices)
-            u_rel = obs_df.release[idx]
-            u_rec = obs_df.recapture[idx]
-            res_i = astar_stochastic_least_cost_path(
-                cents_planar, W, u_rel, u_rec;
-                hsi_mean         = hsi_vec,
-                hsi_se           = hsi_se_v,
-                n_draws          = params.n_stochastic_draws,
-                friction_power   = 2.0,
-                land_mask        = land_mask,
-                centroids_lonlat = cents_lonlat,
-                smooth           = params.smooth_paths,
-                structural_uncertainty = params.add_structural_uncertainty,
-                structural_uncertainty_scale = params.structural_uncertainty_scale,
-                seed             = params.seed + idx
-            )
-            C_domain .+= res_i.corridor_prob
-            C_events[e_idx, :] .= res_i.corridor_prob
-            F_domain .+= res_i.edge_prob
+        # Consolidate bottleneck and directed-flux routing onto the MCMC-fitted
+        # posterior transition kernel (-log P[u, v] edge costs) rather than an
+        # uncalibrated heuristic friction surface.
+        a_s = _sample_column(hasproperty(kernels, :alpha_samples) ? kernels.alpha_samples : nothing)
+        r_s = _sample_column(hasproperty(kernels, :rho_samples) ? kernels.rho_samples : nothing)
+        g_s = _sample_column(hasproperty(kernels, :gamma_samples) ? kernels.gamma_samples : nothing)
+        n_post = min(length(a_s), length(r_s), length(g_s))
+        n_b_draws = n_post >= 2 ? min(n_post, 12) : 1
+        P_b_draws = Vector{SparseMatrixCSC{Float64, Int}}(undef, n_b_draws)
+        if n_b_draws > 1
+            d_idxs = unique(round.(Int, range(1, n_post; length = n_b_draws)))
+            P_b_draws = Vector{SparseMatrixCSC{Float64, Int}}(undef, length(d_idxs))
+            for (k_i, di) in enumerate(d_idxs)
+                P_b_draws[k_i] = sparse(construct_stochastic_transition_kernel(
+                    W, hsi_vec;
+                    gamma     = g_s[di],
+                    residence = r_s[di],
+                    advection = a_s[di],
+                    land_mask = land_mask
+                ))
+            end
+        else
+            P_b_draws[1] = P_base_sp
+        end
+        n_b_draws = length(P_b_draws)
+
+        for (e_idx, (u_rel, u_rec)) in enumerate(eval_pairs)
+            w_pair = 1.0 + log(Float64(pair_counts[(u_rel, u_rec)]))
+            cp = zeros(Float64, n_spatial)
+            for (d_i, P_d) in enumerate(P_b_draws)
+                rng_b = MersenneTwister(hash((u_rel, u_rec, d_i, params.seed)))
+                p_m = predict_bridge_path(
+                    P_d, u_rel, u_rec, nothing;
+                    land_mask = land_mask,
+                    rng       = rng_b
+                )
+                p_m = _dedup_consecutive_nodes(p_m)
+                for u in p_m
+                    1 <= u <= n_spatial && (cp[u] += 1.0 / n_b_draws)
+                end
+                for step_i in 1:(length(p_m) - 1)
+                    u_a, u_b = p_m[step_i], p_m[step_i + 1]
+                    if 1 <= u_a <= n_spatial && 1 <= u_b <= n_spatial && u_a != u_b
+                        F_domain[u_a, u_b] += w_pair / n_b_draws
+                    end
+                end
+            end
+            # Down-weight pinned release/recapture endpoints (0.25) relative to interior
+            # transit conduit nodes (1.0) so pot locations do not masquerade as choke-points.
+            cp[u_rel] *= 0.25
+            cp[u_rec] *= 0.25
+            C_domain .+= w_pair .* cp
+            C_events[e_idx, :] .= w_pair .* cp
         end
 
         # Structural bottleneck index: B(u) = C(u) / deg_marine(u)
@@ -2644,7 +3138,7 @@ if params.dynamic_kernels
         ]
         bottleneck_score = zeros(Float64, n_spatial)
         bottleneck_se    = zeros(Float64, n_spatial)
-        n_ev = length(tag_sample_indices)
+        n_ev = length(eval_pairs)
 
         for u in 1:n_spatial
             is_marine = land_mask === nothing ? true : !land_mask[u]
@@ -2682,6 +3176,9 @@ if params.dynamic_kernels
             )
         end
 
+        directed_flux = cents_lonlat !== nothing ?
+            compute_directed_flux_field(F_domain, cents_lonlat; top_k = 180) : nothing
+
         domain_bottlenecks = (
             transit_density  = C_domain,
             edge_flux        = F_domain,
@@ -2689,6 +3186,7 @@ if params.dynamic_kernels
             bottleneck_se    = bottleneck_se,
             bottleneck_mask  = bottleneck_mask,
             threshold        = b_thresh,
+            directed_flux    = directed_flux,
         )
     end
 
@@ -2754,11 +3252,14 @@ function compute_advanced_diagnostics(
             # Circuit theory models steady-state DC current flux (infinite-horizon
             # random walk potential), which cannot evaluate high-frequency non-stationary
             # time steps directly. When dynamic seasonal HSI is configured or available,
-            # we evaluate conductance using the annual time-averaged HSI field:
+            # Conductance is evaluated on the annual time-averaged HSI field:
             #     \bar{H}_i = (1 / 12) \sum_{m=1}^{12} H_i(m)
-            hsi_circuit = if params.dynamic_kernels && params.use_geodata_habitat &&
-                             hasproperty(loaded.mesh, :centroids_lonlat) &&
-                             loaded.mesh.centroids_lonlat !== nothing
+            hsi_circuit = if hasproperty(loaded, :monthly_hsi) && !isempty(loaded.monthly_hsi) &&
+                             size(loaded.monthly_hsi, 1) == n_spatial
+                vec(mean(loaded.monthly_hsi; dims = 2))
+            elseif params.dynamic_kernels && params.use_geodata_habitat &&
+                   hasproperty(loaded.mesh, :centroids_lonlat) &&
+                   loaded.mesh.centroids_lonlat !== nothing
                 verbose && println("  Averaging dynamic seasonal HSI across 12-month annual cycle for circuit theory...")
                 cents_ll = loaded.mesh.centroids_lonlat
                 min_lon = minimum(c[1] for c in cents_ll)
@@ -2778,9 +3279,6 @@ function compute_advanced_diagnostics(
                     verbose            = false
                 )
                 vec(mean(hsi_annual_mat; dims = 2))
-            elseif hasproperty(loaded, :monthly_hsi) && !isempty(loaded.monthly_hsi) &&
-                   size(loaded.monthly_hsi, 2) >= 12
-                vec(mean(loaded.monthly_hsi[:, 1:12]; dims = 2))
             else
                 hsi_vec
             end
@@ -2803,15 +3301,44 @@ function compute_advanced_diagnostics(
                 "$(sum(p_mask)) / $n_spatial"
             )
 
-            stoch_circuit = posterior_circuit_inference(
-                W, sources_v, sinks_v;
-                hsi_mean     = hsi_circuit,
-                hsi_se       = hsi_se_v,
-                n_draws      = params.n_stochastic_draws * 2,
-                land_mask    = land_mask,
-                top_quantile = 0.90,
-                seed         = params.seed
-            )
+            # Propagate spatially coherent interannual HSI realizations from
+            # loaded.monthly_hsi rather than i.i.d. cell-level white noise.
+            annual_hsi_samples = if hasproperty(loaded, :monthly_hsi) &&
+                                    size(loaded.monthly_hsi, 1) == n_spatial &&
+                                    size(loaded.monthly_hsi, 2) >= 24
+                n_yrs = div(size(loaded.monthly_hsi, 2), 12)
+                n_sel = min(n_yrs, 10)
+                yr_idxs = unique(round.(Int, range(1, n_yrs; length = n_sel)))
+                mat_yr = Matrix{Float64}(undef, n_spatial, length(yr_idxs))
+                for (ci, yi) in enumerate(yr_idxs)
+                    c1 = (yi - 1) * 12 + 1
+                    c2 = min(yi * 12, size(loaded.monthly_hsi, 2))
+                    mat_yr[:, ci] = vec(mean(@view(loaded.monthly_hsi[:, c1:c2]); dims = 2))
+                end
+                mat_yr
+            else
+                nothing
+            end
+
+            stoch_circuit = if annual_hsi_samples !== nothing
+                posterior_circuit_inference(
+                    W, sources_v, sinks_v;
+                    hsi_samples  = annual_hsi_samples,
+                    land_mask    = land_mask,
+                    top_quantile = 0.90,
+                    seed         = params.seed
+                )
+            else
+                posterior_circuit_inference(
+                    W, sources_v, sinks_v;
+                    hsi_mean     = hsi_circuit,
+                    hsi_se       = hsi_se_v,
+                    n_draws      = min(params.n_stochastic_draws, 12),
+                    land_mask    = land_mask,
+                    top_quantile = 0.90,
+                    seed         = params.seed
+                )
+            end
             robust_mask, _, n_robust = identify_stochastic_pinchpoints(
                 stoch_circuit; prob_threshold = 0.80
             )
@@ -2864,224 +3391,2167 @@ rendering errors so the pipeline is never aborted. Exports:
 - Circuit current density and posterior pinch-point maps.
 - Domain-wide bottleneck conduit heatmap.
 """
+function _ramp_hex_color(t::Float64, cmap::Symbol = :viridis)::String
+    u = clamp(isfinite(t) ? t : 0.0, 0.0, 1.0)
+    r, g, b = if cmap === :plasma
+        (round(Int, 13 + 227 * u),
+         round(Int, 8 + 240 * (u^1.6)),
+         round(Int, 135 + 100 * sin(π * u) - 102 * u))
+    elseif cmap === :inferno || cmap === :magma
+        (round(Int, 10 + 242 * (u^0.85)),
+         round(Int, 7 + 215 * (u^1.8)),
+         round(Int, 38 + 140 * sin(π * u)))
+    else
+        # viridis-like perceptual ramp
+        (round(Int, 68 + 185 * (u^1.3)),
+         round(Int, 1 + 230 * (u^0.85)),
+         round(Int, 84 + 90 * sin(π * u) - 45 * u))
+    end
+    rc = clamp(r, 0, 255)
+    gc = clamp(g, 0, 255)
+    bc = clamp(b, 0, 255)
+    return "#" * string(rc, base = 16, pad = 2) *
+           string(gc, base = 16, pad = 2) * string(bc, base = 16, pad = 2)
+end
+
+function _js_escape(s::AbstractString)::String
+    return replace(replace(replace(String(s), '\\' => "\\\\"), '"' => "\\\""), '\n' => " ")
+end
+
+function _encode_field_layer_json(
+    id::AbstractString,
+    tab_label::AbstractString,
+    title::AbstractString,
+    field_label::AbstractString,
+    marine_indices::Vector{Int},
+    field_vals::AbstractVector{<:Real};
+    cmap::Symbol = :viridis,
+    scale_mode::Symbol = :linear,
+    tracks_key::AbstractString = "none",
+    highlight_mask = nothing,
+    highlight_label::AbstractString = "Critical Node"
+)::String
+    m_vals = Float64[
+        u <= length(field_vals) && isfinite(field_vals[u]) ? Float64(field_vals[u]) : 0.0
+        for u in marine_indices
+    ]
+    v_min = isempty(m_vals) ? 0.0 : minimum(m_vals)
+    v_max = isempty(m_vals) ? 1.0 : maximum(m_vals)
+
+    pos_vals = filter(>(1e-12), m_vals)
+    v_ref = if scale_mode === :sqrt_p99 && !isempty(pos_vals)
+        max(quantile(pos_vals, 0.99), v_min + 1e-9)
+    else
+        max(v_max, v_min + 1e-9)
+    end
+    span_ref = max(v_ref - v_min, 1e-9)
+
+    cols_vec = Vector{String}(undef, length(m_vals))
+    ops_vec  = Vector{String}(undef, length(m_vals))
+    for (idx, v) in enumerate(m_vals)
+        if scale_mode === :sqrt_p99
+            if v <= 1e-9
+                cols_vec[idx] = "\"" * _ramp_hex_color(0.0, cmap) * "\""
+                ops_vec[idx]  = "0.06"
+            else
+                u_norm = clamp(sqrt(max(0.0, v - v_min) / span_ref), 0.0, 1.0)
+                cols_vec[idx] = "\"" * _ramp_hex_color(u_norm, cmap) * "\""
+                ops_vec[idx]  = string(round(0.22 + 0.58 * u_norm; digits = 2))
+            end
+        else
+            u_norm = clamp((v - v_min) / max(v_max - v_min, 1e-9), 0.0, 1.0)
+            cols_vec[idx] = "\"" * _ramp_hex_color(u_norm, cmap) * "\""
+            ops_vec[idx]  = "0.60"
+        end
+    end
+    cols_str = join(cols_vec, ",")
+    ops_str  = join(ops_vec, ",")
+    vals_str = join([string(round(v; digits = 4)) for v in m_vals], ",")
+
+    hi_idx = Int[]
+    if highlight_mask !== nothing
+        for (k, u) in enumerate(marine_indices)
+            if u <= length(highlight_mask) && Bool(highlight_mask[u])
+                push!(hi_idx, k - 1) # 0-based index into marine cells
+            end
+        end
+    end
+    hi_str = join(string.(hi_idx), ",")
+    grad_stops = join(["$(_ramp_hex_color(s, cmap)) $(round(Int, s * 100))%" for s in 0.0:0.2:1.0], ", ")
+    v_mid_disp = scale_mode === :sqrt_p99 ? v_min + 0.25 * span_ref : 0.5 * (v_min + v_ref)
+
+    return "{" *
+        "\"id\":\"$(_js_escape(id))\"," *
+        "\"tab\":\"$(_js_escape(tab_label))\"," *
+        "\"title\":\"$(_js_escape(title))\"," *
+        "\"label\":\"$(_js_escape(field_label))\"," *
+        "\"vmin\":$(round(v_min; digits=4))," *
+        "\"vmid\":$(round(v_mid_disp; digits=4))," *
+        "\"vmax\":$(round(v_ref; digits=4))," *
+        "\"grad\":\"$grad_stops\"," *
+        "\"tracks\":\"$tracks_key\"," *
+        "\"hiLabel\":\"$(_js_escape(highlight_label))\"," *
+        "\"hi\":[$hi_str]," *
+        "\"k\":[$cols_str]," *
+        "\"o\":[$ops_str]," *
+        "\"v\":[$vals_str]" *
+        "}"
+end
+
+function _ppc_inner_html(ppc::NamedTuple)::String
+    function _trace_svg_tab(vals::Vector{Float64}, label::String, color::String; width::Int = 420, height::Int = 175)::String
+        N = length(vals)
+        N < 2 && return "<p style='color:#64748b;font-size:12px;'>Insufficient draws</p>"
+        vmin, vmax = minimum(vals), maximum(vals)
+        abs(vmax - vmin) < 1e-14 && (vmax = vmin + 1.0)
+        pad_l, pad_r, pad_t, pad_b = 52, 14, 18, 30
+        pw = width - pad_l - pad_r
+        ph = height - pad_t - pad_b
+        y_ax = height - pad_b
+        io = IOBuffer()
+        write(io, "<svg width=\"$width\" height=\"$height\" xmlns=\"http://www.w3.org/2000/svg\">")
+        write(io, "<line x1=\"$pad_l\" y1=\"$y_ax\" x2=\"$(width - pad_r)\" y2=\"$y_ax\" stroke=\"#64748b\" stroke-width=\"1\"/>")
+        write(io, "<line x1=\"$pad_l\" y1=\"$pad_t\" x2=\"$pad_l\" y2=\"$y_ax\" stroke=\"#64748b\" stroke-width=\"1\"/>")
+        pts = String[]
+        for i in 1:N
+            px = pad_l + ((i - 1) / (N - 1)) * pw
+            py = y_ax - ((vals[i] - vmin) / (vmax - vmin)) * ph
+            push!(pts, (i == 1 ? "M" : "L") * " $(round(px; digits=1)) $(round(py; digits=1))")
+        end
+        write(io, "<path d=\"$(join(pts, " "))\" fill=\"none\" stroke=\"$color\" stroke-width=\"1.8\"/>")
+        write(io, "<text x=\"$(pad_l + pw ÷ 2)\" y=\"$(height - 6)\" text-anchor=\"middle\" fill=\"#475569\" font-size=\"11\">$label</text>")
+        write(io, "<text x=\"$(pad_l - 4)\" y=\"$y_ax\" text-anchor=\"end\" fill=\"#64748b\" font-size=\"10\" font-family=\"monospace\">$(round(vmin; digits=4))</text>")
+        write(io, "<text x=\"$(pad_l - 4)\" y=\"$(pad_t + 8)\" text-anchor=\"end\" fill=\"#64748b\" font-size=\"10\" font-family=\"monospace\">$(round(vmax; digits=4))</text>")
+        write(io, "</svg>")
+        return String(take!(io))
+    end
+
+    function _dist_svg_tab(obs::Vector{Float64}, pred::Vector{Float64}; width::Int = 820, height::Int = 190)::String
+        N = length(obs)
+        N < 1 && return "<p>No distribution</p>"
+        active_units = findall(i -> obs[i] > 0.0 || (i <= length(pred) && pred[i] > 1e-6), 1:N)
+        isempty(active_units) && (active_units = collect(1:min(N, 60)))
+        sort!(active_units, by = u -> (obs[u], u <= length(pred) ? pred[u] : 0.0), rev = true)
+        n_show = min(length(active_units), 60)
+        u_sel = active_units[1:n_show]
+        obs_s = obs[u_sel]
+        pred_s = [u <= length(pred) ? pred[u] : 0.0 for u in u_sel]
+        vmax = max(maximum(obs_s), maximum(pred_s), 1e-14)
+        pad_l, pad_r, pad_t, pad_b = 12, 12, 16, 26
+        bw = max(2, (width - pad_l - pad_r) ÷ n_show)
+        ph = height - pad_t - pad_b
+        y_ax = height - pad_b
+        io = IOBuffer()
+        write(io, "<svg width=\"$width\" height=\"$height\" xmlns=\"http://www.w3.org/2000/svg\">")
+        for i in 1:n_show
+            x0 = pad_l + (i - 1) * bw
+            h_o = round(Int, (obs_s[i] / vmax) * ph)
+            h_p = round(Int, (pred_s[i] / vmax) * ph)
+            write(io, "<rect x=\"$x0\" y=\"$(y_ax - h_o)\" width=\"$(max(1, bw - 1))\" height=\"$h_o\" fill=\"#0284c7\" opacity=\"0.78\"/>")
+            write(io, "<rect x=\"$x0\" y=\"$(y_ax - h_p)\" width=\"$(max(1, bw - 1))\" height=\"$h_p\" fill=\"#e11d48\" opacity=\"0.48\"/>")
+        end
+        write(io, "<line x1=\"$pad_l\" y1=\"$y_ax\" x2=\"$(width - pad_r)\" y2=\"$y_ax\" stroke=\"#64748b\" stroke-width=\"1\"/>")
+        write(io, "<text x=\"$(width ÷ 2)\" y=\"$(height - 6)\" text-anchor=\"middle\" fill=\"#475569\" font-size=\"11\">Top $n_show Recapture Units — Blue: Observed, Red: Posterior Mean Predicted</text>")
+        write(io, "</svg>")
+        return String(take!(io))
+    end
+
+    kl = Float64.(ppc.kl_divergences)
+    obs_d = Float64.(ppc.observed_dist)
+    pred_d = hasproperty(ppc, :predicted_dist_mean) ? Float64.(ppc.predicted_dist_mean) : Float64[]
+    sm = ppc.summary
+    svg_k = _trace_svg_tab(kl, "KL Divergence across Posterior Draws", "#e11d48")
+    svg_d = _dist_svg_tab(obs_d, pred_d)
+
+    return """
+    <div class="grid">
+      <div class="card">
+        <h2>Posterior Predictive Summary ($(sm.n_observations) observations, $(sm.n_draws) draws)</h2>
+        <table>
+          <tr><th>Metric</th><th>Mean</th><th>SD</th><th>95% Credible Interval</th></tr>
+          <tr><td>KL Divergence (nats)</td><td>$(round(sm.kl_mean; digits=4))</td><td>$(round(sm.kl_sd; digits=4))</td><td>[$(round(sm.kl_lower_ci; digits=4)), $(round(sm.kl_upper_ci; digits=4))]</td></tr>
+        </table>
+      </div>
+      <div class="card"><h2>KL Divergence Trace</h2>$svg_k</div>
+    </div>
+    <div class="card" style="overflow-x:auto;"><h2>Observed vs Predicted Recapture Distribution</h2>$svg_d</div>
+    """
+end
+
+function _svg_histogram(
+    vals::AbstractVector{<:Real},
+    xlabel::AbstractString,
+    color::AbstractString = "#3b82f6";
+    nbins::Int = 20,
+    width::Int = 360,
+    height::Int = 190
+)::String
+    v = Float64[Float64(x) for x in vals if isfinite(x)]
+    isempty(v) && return "<p style='color:#64748b;font-size:12px;'>No finite data</p>"
+    vmin, vmax = minimum(v), maximum(v)
+    if vmax - vmin < 1e-12
+        vmin -= 0.5
+        vmax += 0.5
+    end
+    edges = collect(range(vmin, vmax; length = nbins + 1))
+    counts = zeros(Int, nbins)
+    for x in v
+        b = clamp(searchsortedlast(edges, x), 1, nbins)
+        counts[b] += 1
+    end
+    cmax = max(1, maximum(counts))
+    pad_l, pad_r, pad_t, pad_b = 40, 14, 16, 34
+    pw = width - pad_l - pad_r
+    ph = height - pad_t - pad_b
+    bw = pw / nbins
+    y_ax = height - pad_b
+
+    io = IOBuffer()
+    write(io, "<svg width=\"$width\" height=\"$height\" xmlns=\"http://www.w3.org/2000/svg\">")
+    for b in 1:nbins
+        bh = (counts[b] / cmax) * ph
+        x0 = pad_l + (b - 1) * bw
+        y0 = y_ax - bh
+        write(io, "<rect x=\"$(round(x0 + 0.8; digits=1))\" y=\"$(round(y0; digits=1))\" " *
+                  "width=\"$(round(max(1.0, bw - 1.6); digits=1))\" height=\"$(round(bh; digits=1))\" " *
+                  "fill=\"$color\" fill-opacity=\"0.82\" rx=\"1.5\"/>")
+    end
+    # Mean vertical line
+    mu = mean(v)
+    mx = pad_l + ((mu - vmin) / (vmax - vmin)) * pw
+    write(io, "<line x1=\"$(round(mx; digits=1))\" y1=\"$pad_t\" x2=\"$(round(mx; digits=1))\" y2=\"$y_ax\" " *
+              "stroke=\"#ef4444\" stroke-width=\"1.6\" stroke-dasharray=\"4,3\"/>")
+    write(io, "<line x1=\"$pad_l\" y1=\"$y_ax\" x2=\"$(width - pad_r)\" y2=\"$y_ax\" stroke=\"#64748b\" stroke-width=\"1\"/>")
+    write(io, "<line x1=\"$pad_l\" y1=\"$pad_t\" x2=\"$pad_l\" y2=\"$y_ax\" stroke=\"#64748b\" stroke-width=\"1\"/>")
+    write(io, "<text x=\"$pad_l\" y=\"$(y_ax + 13)\" fill=\"#64748b\" font-size=\"10\" font-family=\"monospace\">$(round(vmin; digits=2))</text>")
+    write(io, "<text x=\"$(width - pad_r)\" y=\"$(y_ax + 13)\" text-anchor=\"end\" fill=\"#64748b\" font-size=\"10\" font-family=\"monospace\">$(round(vmax; digits=2))</text>")
+    write(io, "<text x=\"$(pad_l - 4)\" y=\"$(pad_t + 8)\" text-anchor=\"end\" fill=\"#64748b\" font-size=\"10\" font-family=\"monospace\">$cmax</text>")
+    write(io, "<text x=\"$(pad_l + pw ÷ 2)\" y=\"$(height - 5)\" text-anchor=\"middle\" fill=\"#475569\" font-size=\"11\">$xlabel (mean=$(round(mu; digits=2)))</text>")
+    write(io, "</svg>")
+    return String(take!(io))
+end
+
+function _svg_polar_rose(bearings_deg::AbstractVector{<:Real}; size_px::Int = 200)::String
+    b_clean = Float64[mod(Float64(b), 360.0) for b in bearings_deg if isfinite(b)]
+    isempty(b_clean) && return "<p style='color:#64748b;font-size:12px;'>No bearings</p>"
+    n_sec = 12
+    sec_w = 360.0 / n_sec
+    counts = zeros(Int, n_sec)
+    for b in b_clean
+        idx = clamp(floor(Int, b / sec_w) + 1, 1, n_sec)
+        counts[idx] += 1
+    end
+    cmax = max(1, maximum(counts))
+    cx = size_px / 2
+    cy = size_px / 2
+    rmax = size_px * 0.38
+
+    io = IOBuffer()
+    write(io, "<svg width=\"$size_px\" height=\"$size_px\" xmlns=\"http://www.w3.org/2000/svg\">")
+    for frac in (0.5, 1.0)
+        write(io, "<circle cx=\"$cx\" cy=\"$cy\" r=\"$(round(rmax * frac; digits=1))\" fill=\"none\" stroke=\"#cbd5e1\" stroke-width=\"0.8\" stroke-dasharray=\"2,2\"/>")
+    end
+    write(io, "<line x1=\"$cx\" y1=\"$(cy - rmax - 6)\" x2=\"$cx\" y2=\"$(cy + rmax + 6)\" stroke=\"#cbd5e1\" stroke-width=\"0.8\"/>")
+    write(io, "<line x1=\"$(cx - rmax - 6)\" y1=\"$cy\" x2=\"$(cx + rmax + 6)\" y2=\"$cy\" stroke=\"#cbd5e1\" stroke-width=\"0.8\"/>")
+    for s in 1:n_sec
+        counts[s] == 0 && continue
+        r = (counts[s] / cmax) * rmax
+        a1 = deg2rad((s - 1) * sec_w - 90.0)
+        a2 = deg2rad(s * sec_w - 90.0)
+        x1, y1 = cx + r * cos(a1), cy + r * sin(a1)
+        x2, y2 = cx + r * cos(a2), cy + r * sin(a2)
+        write(io, "<path d=\"M $cx $cy L $(round(x1; digits=1)) $(round(y1; digits=1)) A $(round(r; digits=1)) $(round(r; digits=1)) 0 0 1 $(round(x2; digits=1)) $(round(y2; digits=1)) Z\" fill=\"#0ea5e9\" fill-opacity=\"0.72\" stroke=\"#0284c7\" stroke-width=\"1\"/>")
+    end
+    write(io, "<text x=\"$cx\" y=\"13\" text-anchor=\"middle\" fill=\"#475569\" font-size=\"10\" font-weight=\"600\">N</text>")
+    write(io, "<text x=\"$(size_px - 8)\" y=\"$(cy + 4)\" text-anchor=\"end\" fill=\"#475569\" font-size=\"10\" font-weight=\"600\">E</text>")
+    write(io, "<text x=\"$cx\" y=\"$(size_px - 4)\" text-anchor=\"middle\" fill=\"#475569\" font-size=\"10\" font-weight=\"600\">S</text>")
+    write(io, "<text x=\"8\" y=\"$(cy + 4)\" fill=\"#475569\" font-size=\"10\" font-weight=\"600\">W</text>")
+    write(io, "</svg>")
+    return String(take!(io))
+end
+
+function _html_escape(s::AbstractString)::String
+    s1 = replace(String(s), "&" => "&amp;")
+    s2 = replace(s1, "<" => "&lt;")
+    return replace(s2, ">" => "&gt;")
+end
+
+function _path_analysis_inner_html(
+    kernels::NamedTuple,
+    paths_rich::Vector,
+    mov_stats,
+    phenology,
+    trait_models;
+    bathy_mig = nothing,
+    disp_diag = nothing,
+    bio_strat = nothing,
+    spatial_roses = nothing,
+    taxis_proj = nothing,
+    validation = nothing
+)::String
+    a_draws = _sample_column(hasproperty(kernels, :alpha_samples) ? kernels.alpha_samples : nothing)
+    r_draws = _sample_column(hasproperty(kernels, :rho_samples) ? kernels.rho_samples : nothing)
+    g_draws = _sample_column(hasproperty(kernels, :gamma_samples) ? kernels.gamma_samples : nothing)
+
+    ci_txt(v) = length(v) >= 2 ?
+        "[$(round(quantile(v, 0.025); digits=4)), $(round(quantile(v, 0.975); digits=4))]" : "—"
+
+    disps  = mov_stats !== nothing ? mov_stats.net_displacement_km : Float64[]
+    plens  = mov_stats !== nothing ? mov_stats.path_length_km : Float64[]
+    speeds = Float64[p.speed_km_per_year for p in paths_rich if isfinite(p.speed_km_per_year)]
+
+    pheno_df = if phenology !== nothing && hasproperty(phenology, :monthly_df)
+        phenology.monthly_df
+    elseif phenology !== nothing && hasproperty(phenology, :monthly)
+        phenology.monthly
+    else
+        DataFrame()
+    end
+    pheno_rows = ""
+    if nrow(pheno_df) > 0
+        for r in eachrow(pheno_df)
+            m_disp = hasproperty(r, :mean_disp_km) ? r.mean_disp_km : 0.0
+            med_disp = hasproperty(r, :median_disp_km) ? r.median_disp_km : m_disp
+            m_dz = hasproperty(r, :mean_dz_m) ? r.mean_dz_m : 0.0
+            cnt = hasproperty(r, :n_events) ? r.n_events : 0
+            cnt == 0 && continue
+            pheno_rows *= "<tr><td>$(_html_escape(string(r.month_name)))</td><td>$cnt</td>" *
+                          "<td>$(round(Float64(m_disp); digits=2))</td>" *
+                          "<td>$(round(Float64(med_disp); digits=2))</td>" *
+                          "<td>$(round(Float64(m_dz); digits=2))</td></tr>"
+        end
+    end
+
+    trait_rows = ""
+    trait_lbl = (trait_models !== nothing && hasproperty(trait_models, :trait_name)) ?
+        _html_escape(string(trait_models.trait_name)) : "trait"
+    if trait_models !== nothing && hasproperty(trait_models, :models) && !isempty(trait_models.models)
+        for mname in sort!(collect(keys(trait_models.models)))
+            mres = trait_models.models[mname]
+            sl = hasproperty(mres, :beta_1) ? round(Float64(mres.beta_1); digits = 4) : 0.0
+            r2 = hasproperty(mres, :r2) ? round(Float64(mres.r2); digits = 4) : 0.0
+            pv = hasproperty(mres, :p_val) ? round(Float64(mres.p_val); digits = 4) : 1.0
+            n_f = hasproperty(mres, :n_obs) ? string(mres.n_obs) : "—"
+            trait_rows *= "<tr><td>$(_html_escape(mname))</td><td>$n_f</td>" *
+                          "<td>$sl</td><td>$r2</td><td>$pv</td></tr>"
+        end
+    end
+
+    alpha_card = isempty(a_draws) ? "" :
+        "<div class=\"card\"><h2>Posterior Advection (&alpha;) Draws</h2>" *
+        _svg_histogram(a_draws, "alpha", "#0891b2") * "</div>"
+    pheno_card = isempty(pheno_rows) ? "" :
+        "<div class=\"card\"><h2>Seasonal Movement Phenology (by Release Month)</h2>" *
+        "<table><tr><th>Month</th><th>Events</th><th>Mean Disp. (km)</th>" *
+        "<th>Med. Disp. (km)</th><th>Mean &Delta;z (m)</th></tr>" *
+        pheno_rows * "</table></div>"
+    trait_card = isempty(trait_rows) ? "" :
+        "<div class=\"card\"><h2>Trait-Movement OLS Associations (Predictor: $trait_lbl)</h2>" *
+        "<table><tr><th>Response</th><th>n</th><th>Slope (&beta;&#8321;)</th>" *
+        "<th>R&sup2;</th><th>p-value</th></tr>" *
+        trait_rows * "</table></div>"
+    extra_grid = (isempty(pheno_card) && isempty(trait_card)) ? "" :
+        "<div class=\"grid\">$pheno_card$trait_card</div>"
+
+    # Separate Acoustic (OTN) vs. Commercial Trap (BIO) inference card
+    ds_card = ""
+    if hasproperty(kernels, :datasource_summary) && kernels.datasource_summary !== nothing
+        ds_df = kernels.datasource_summary isa DataFrame ?
+            kernels.datasource_summary : DataFrame(kernels.datasource_summary)
+        if nrow(ds_df) >= 2
+            ds_rows = ""
+            for r in eachrow(ds_df)
+                ds_rows *= "<tr><td><b>$(_html_escape(string(r.stratum)))</b></td>" *
+                    "<td>$(r.n_obs) ($(r.n_tags))</td>" *
+                    "<td>$(round(Float64(r.pct_stationary); digits=1))%</td>" *
+                    "<td>$(round(Float64(r.median_disp_km); digits=1)) / $(round(Float64(r.mean_disp_km); digits=1))</td>" *
+                    "<td>$(round(Float64(r.alpha_mean); digits=3)) [$(round(Float64(r.alpha_ci_lo); digits=3)), $(round(Float64(r.alpha_ci_hi); digits=3))]</td>" *
+                    "<td>$(round(Float64(r.rho_mean); digits=3)) [$(round(Float64(r.rho_ci_lo); digits=3)), $(round(Float64(r.rho_ci_hi); digits=3))]</td>" *
+                    "<td>$(round(Float64(r.gamma_mean); digits=2))</td>" *
+                    "<td>$(round(Float64(r.eff_speed_km_yr); digits=1)) / $(round(Float64(r.eff_diff_km2_yr); digits=0))</td></tr>"
+            end
+            ds_card = "<div class=\"card\" style=\"margin-bottom:18px;overflow-x:auto;\">" *
+                "<h2>Acoustic Array (OTN) vs. Commercial Trap (BIO) Transition Kernel Inference</h2>" *
+                "<table><tr><th>Data Source</th><th>Obs (Tags)</th><th>% Stat.</th>" *
+                "<th>Med / Mean Disp (km)</th><th>&alpha; [95% CI]</th><th>&rho; [95% CI]</th>" *
+                "<th>&gamma;</th><th>v<sub>eff</sub> (km/yr) / D<sub>eff</sub> (km&sup2;/yr)</th></tr>" *
+                "$ds_rows</table></div>"
+        end
+    end
+
+    # Compass bearing roses are placed at their geographic coordinates on the map
+    # rather than rendered as a tabular grid inside the report pane.
+
+    # Bathymetric, thermal, & habitat gradient taxis vector projections
+    taxis_card = ""
+    if taxis_proj !== nothing && hasproperty(taxis_proj, :n_obs) && taxis_proj.n_obs > 0
+        trows = ""
+        for df_part in (taxis_proj.overall, taxis_proj.by_season, taxis_proj.by_cw)
+            nrow(df_part) == 0 && continue
+            for r in eachrow(df_part)
+                fmt_num(x, d=3) = isfinite(Float64(x)) ? string(round(Float64(x); digits=d)) : "—"
+                trows *= "<tr><td>$(_html_escape(string(r.stratum)))</td><td>$(r.n_bathy)</td>" *
+                    "<td>$(fmt_num(r.mean_downslope_cos, 3)) (p=$(fmt_num(r.bathy_p, 3)))</td>" *
+                    "<td>$(fmt_num(r.mean_downslope_km, 2))</td>" *
+                    "<td>$(isfinite(Float64(r.along_isobath_frac)) ? string(round(100*Float64(r.along_isobath_frac); digits=1)) * "%" : "—")</td>" *
+                    "<td>$(fmt_num(r.mean_warmward_cos, 3)) (p=$(fmt_num(r.thermal_p, 3)))</td>" *
+                    "<td>$(fmt_num(r.mean_delta_T_C, 2))</td>" *
+                    "<td>$(fmt_num(r.mean_hsi_upgrad_cos, 3))</td></tr>"
+            end
+        end
+        taxis_card = "<div class=\"card\" style=\"margin-bottom:18px;overflow-x:auto;\">" *
+            "<h2>Bathymetric (&nabla;z), Thermal (&nabla;T), &amp; Habitat (&nabla;HSI) Taxis Vector Projections</h2>" *
+            "<p style=\"font-size:12px;margin:0 0 8px 0;\">Positive cosines denote net movement downslope (deeper), warmward (higher bottom T), and up-HSI gradient; along-isobath % measures contour-following perpendicular to &nabla;z.</p>" *
+            "<table><tr><th>Stratum</th><th>n</th><th>Downslope cos&psi;<sub>z</sub></th>" *
+            "<th>Downslope (km)</th><th>Along-Isobath</th><th>Warmward cos&psi;<sub>T</sub></th>" *
+            "<th>Mean &Delta;T (&deg;C)</th><th>Up-HSI cos&psi;<sub>h</sub></th></tr>$trows</table></div>"
+    end
+
+    # Multi-horizon MSD scaling & null-model LPPD comparison
+    disp_card = ""
+    if disp_diag !== nothing && hasproperty(disp_diag, :bins_df) && nrow(disp_diag.bins_df) > 0
+        drows = ""
+        for r in eachrow(disp_diag.bins_df)
+            drows *= "<tr><td>$(_html_escape(string(r.horizon)))</td><td>$(r.n_obs)</td>" *
+                     "<td>$(round(r.emp_disp_km; digits=1))</td><td>$(round(r.pred_disp_km; digits=1))</td>" *
+                     "<td>$(round(r.emp_msd_km2; digits=0))</td><td>$(round(r.pred_msd_km2; digits=0))</td></tr>"
+        end
+        beta_s = isfinite(disp_diag.msd_beta) ? string(round(disp_diag.msd_beta; digits=3)) : "—"
+        dlppd_s = isfinite(disp_diag.delta_lppd) ? string(round(disp_diag.delta_lppd; digits=1)) : "—"
+        gain_s = isfinite(disp_diag.mean_ll_gain) ? string(round(disp_diag.mean_ll_gain; digits=4)) : "—"
+        disp_card = "<div class=\"card\"><h2>Multi-Horizon Dispersal Scaling &amp; Null-Model Test</h2>" *
+                    "<p style=\"font-size:12.5px;margin:0 0 10px 0;\">" *
+                    "<b>MSD exponent &beta;:</b> $beta_s &nbsp;|&nbsp; " *
+                    "<b>&Delta;LPPD (fitted vs. isotropic null):</b> $dlppd_s ($gain_s / obs, n = $(disp_diag.n_obs))</p>" *
+                    "<table><tr><th>Time Interval</th><th>n</th><th>Emp. Disp (km)</th><th>Pred. Disp (km)</th>" *
+                    "<th>Emp. MSD (km&sup2;)</th><th>Pred. MSD (km&sup2;)</th></tr>$drows</table></div>"
+    end
+
+    # Bathymetric / ontogenetic migration card
+    bathy_card = ""
+    if bathy_mig !== nothing && hasproperty(bathy_mig, :n_obs) && bathy_mig.n_obs > 0
+        brows = ""
+        if nrow(bathy_mig.by_size) > 0
+            for r in eachrow(bathy_mig.by_size)
+                brows *= "<tr><td>Size: $(_html_escape(string(r.stratum)))</td><td>$(r.n)</td>" *
+                         "<td>$(round(r.mean_dz_m; digits=2))</td><td>$(round(r.median_dz_m; digits=2))</td>" *
+                         "<td>$(round(r.pct_deeper; digits=1))%</td></tr>"
+            end
+        end
+        if nrow(bathy_mig.by_cc) > 0
+            for r in eachrow(bathy_mig.by_cc)
+                brows *= "<tr><td>Shell: $(_html_escape(string(r.stratum)))</td><td>$(r.n)</td>" *
+                         "<td>$(round(r.mean_dz_m; digits=2))</td><td>$(round(r.median_dz_m; digits=2))</td>" *
+                         "<td>$(round(r.pct_deeper; digits=1))%</td></tr>"
+            end
+        end
+        bathy_card = "<div class=\"card\"><h2>Bathymetric &amp; Ontogenetic Migration (&Delta;z = z<sub>rec</sub> &minus; z<sub>rel</sub>)</h2>" *
+                     "<p style=\"font-size:12.5px;margin:0 0 10px 0;\">" *
+                     "<b>Overall mean &Delta;z:</b> $(round(bathy_mig.mean_dz_m; digits=2)) m " *
+                     "(t = $(round(bathy_mig.t_stat; digits=2)), p = $(round(bathy_mig.p_val; digits=4))) &nbsp;|&nbsp; " *
+                     "<b>Deeper (&gt;5 m):</b> $(round(bathy_mig.pct_deeper; digits=1))% &nbsp;|&nbsp; " *
+                     "<b>Shallower (&lt;&minus;5 m):</b> $(round(bathy_mig.pct_shallower; digits=1))%</p>" *
+                     "<table><tr><th>Stratum</th><th>n</th><th>Mean &Delta;z (m)</th>" *
+                     "<th>Median &Delta;z (m)</th><th>% Deeper</th></tr>$brows</table></div>"
+    end
+
+    # Biological-state stratification (shell condition & size class)
+    bio_card = ""
+    if bio_strat !== nothing && (nrow(bio_strat.by_cc) > 0 || nrow(bio_strat.by_cw) > 0)
+        srows = ""
+        for r in eachrow(bio_strat.by_cc)
+            srows *= "<tr><td>$(_html_escape(string(r.stratum)))</td><td>$(r.n_obs)</td><td>$(round(r.pct_stationary; digits=1))%</td>" *
+                     "<td>$(round(r.median_disp_km; digits=1))</td><td>$(round(r.mean_disp_km; digits=1))</td>" *
+                     "<td>$(round(r.mean_speed_yr; digits=1))</td></tr>"
+        end
+        for r in eachrow(bio_strat.by_cw)
+            srows *= "<tr><td>CW $(_html_escape(string(r.stratum)))</td><td>$(r.n_obs)</td><td>$(round(r.pct_stationary; digits=1))%</td>" *
+                     "<td>$(round(r.median_disp_km; digits=1))</td><td>$(round(r.mean_disp_km; digits=1))</td>" *
+                     "<td>$(round(r.mean_speed_yr; digits=1))</td></tr>"
+        end
+        bio_card = "<div class=\"card\"><h2>Biological-State Mobility Stratification (All Observations)</h2>" *
+                   "<table><tr><th>Stratum</th><th>n</th><th>% Stationary</th><th>Med. Disp (km)</th>" *
+                   "<th>Mean Disp (km)</th><th>Mean Speed (km/yr)</th></tr>$srows</table></div>"
+    end
+
+    # 1-Year (P^365) HSI-weighted regional management-area connectivity matrix
+    conn_card = ""
+    if validation !== nothing && hasproperty(validation, :connectivity_matrix) &&
+       validation.connectivity_matrix !== nothing && validation.connectivity_matrix.n_regions >= 2
+        cm = validation.connectivity_matrix
+        lbls = [_html_escape(string(l)) for l in cm.region_labels]
+        hdr = "<tr><th>From \\ To (1-Yr P<sup>365</sup>)</th>" * join(["<th>$l</th>" for l in lbls], "") * "</tr>"
+        crows = ""
+        for i in 1:cm.n_regions
+            cells = join([
+                "<td>$(round(cm.connectivity_matrix[i, j]; digits=4)) (n=$(cm.flow_counts[i, j]))</td>"
+                for j in 1:cm.n_regions
+            ], "")
+            crows *= "<tr><td><b>$(lbls[i])</b></td>$cells</tr>"
+        end
+        conn_card = "<div class=\"card\"><h2>1-Year HSI-Weighted Regional Transition Probabilities</h2>" *
+                    "<table>$hdr$crows</table></div>"
+    end
+
+    adv_grid_1 = (isempty(disp_card) && isempty(bathy_card)) ? "" :
+        "<div class=\"grid\">$disp_card$bathy_card</div>"
+    adv_grid_2 = (isempty(bio_card) && isempty(conn_card)) ? "" :
+        "<div class=\"grid\">$bio_card$conn_card</div>"
+
+    svg_disp = _svg_histogram(disps, "Net Displacement (km)", "#2563eb")
+    svg_plen = _svg_histogram(plens, "Cumulative Bridge Length (km)", "#7c3aed")
+    svg_spd  = _svg_histogram(speeds, "Speed (km/yr)", "#d97706")
+
+    disp_summary = isempty(disps) ? "—" : "$(round(mean(disps); digits=2)) / $(round(median(disps); digits=2))"
+    plen_summary = isempty(plens) ? "—" : "$(round(mean(plens); digits=2)) / $(round(median(plens); digits=2))"
+    spd_summary  = isempty(speeds) ? "—" : "$(round(mean(speeds); digits=1)) / $(round(quantile(speeds, 0.95); digits=1))"
+
+    return """
+    <div class="grid">
+      <div class="card">
+        <h2>Fitted Transition Kernel Parameters (Pooled)</h2>
+        <table>
+          <tr><th>Parameter</th><th>Posterior Mean</th><th>95% CI</th></tr>
+          <tr><td>Advection weight (&alpha;)</td><td>$(round(Float64(mean(kernels.alpha_hat)); digits=4))</td><td>$(ci_txt(a_draws))</td></tr>
+          <tr><td>Residence probability (&rho;)</td><td>$(round(Float64(mean(kernels.rho_hat)); digits=4))</td><td>$(ci_txt(r_draws))</td></tr>
+          <tr><td>Habitat gradient (&gamma;)</td><td>$(round(Float64(mean(kernels.gamma_hat)); digits=4))</td><td>$(ci_txt(g_draws))</td></tr>
+        </table>
+      </div>
+      <div class="card">
+        <h2>Markov-Bridge Trajectory Summary ($(length(paths_rich)) sampled tracks)</h2>
+        <table>
+          <tr><th>Metric</th><th>Value</th></tr>
+          <tr><td>Mean / Median net displacement (km)</td><td>$disp_summary</td></tr>
+          <tr><td>Mean / Median Markov-bridge path length (km)</td><td>$plen_summary</td></tr>
+          <tr><td>Mean / 95th-pct annual speed (km/yr)</td><td>$spd_summary</td></tr>
+        </table>
+      </div>
+    </div>
+    $ds_card
+    $taxis_card
+    <div class="grid">
+      <div class="card"><h2>Net Displacement Distribution (km)</h2>$svg_disp</div>
+      <div class="card"><h2>Markov-Bridge Cumulative Length (km)</h2>$svg_plen</div>
+      <div class="card"><h2>Annual Movement Speed (km/yr)</h2>$svg_spd</div>
+      $alpha_card
+    </div>
+    $extra_grid
+    $adv_grid_1
+    $adv_grid_2
+    """
+end
+
+function _serialize_tracks_json(paths_vec::Vector; max_draw::Int = 300)::String
+    palette = ["#ef4444", "#f97316", "#eab308", "#22c55e", "#06b6d4", "#3b82f6", "#a855f7", "#ec4899"]
+    items = String[]
+    drawn = 0
+    for idx in eachindex(paths_vec)
+        drawn >= max_draw && break
+        p = paths_vec[idx]
+        (length(p.coords) < 2 || p.total_dist_km <= 0.05) && continue
+        drawn += 1
+        pts = join(["[$(round(Float64(c[2]); digits=5)),$(round(Float64(c[1]); digits=5))]" for c in p.coords], ",")
+        col = palette[mod1(drawn, length(palette))]
+        n_hops = length(p.coords) - 1
+        info = _js_escape(
+            "<b>Tag $(p.tagid)</b> ($n_hops marine hops)<br>" *
+            "Bridge path length: $(round(p.total_dist_km; digits=1)) km<br>" *
+            "Net displacement: $(round(p.displacement_km; digits=1)) km<br>" *
+            "Speed: $(round(p.speed_km_per_year; digits=1)) km/yr | Mean HSI: $(round(p.mean_hsi; digits=3))"
+        )
+        push!(items, "{\"c\":[$pts],\"k\":\"$col\",\"p\":\"$info\"}")
+    end
+    return "[" * join(items, ",") * "]"
+end
+
+function _svg_map_polar_rose(
+    counts::AbstractVector{<:Integer},
+    mean_bearing_deg::Real,
+    r_bar::Real,
+    rayleigh_p::Real;
+    size_px::Int = 78
+)::String
+    n_sec = length(counts)
+    n_sec == 0 && return ""
+    sec_w = 360.0 / n_sec
+    cmax = max(1, maximum(counts))
+    cx = size_px / 2.0
+    cy = size_px / 2.0
+    rmax = size_px * 0.40
+    sig = rayleigh_p < 0.05
+    petal_fill = sig ? "#0284c7" : "#64748b"
+    petal_stroke = sig ? "#0369a1" : "#475569"
+
+    io = IOBuffer()
+    write(io, "<svg width=\"$size_px\" height=\"$size_px\" viewBox=\"0 0 $size_px $size_px\" xmlns=\"http://www.w3.org/2000/svg\">")
+    write(io, "<circle cx=\"$cx\" cy=\"$cy\" r=\"$(round(rmax + 3.0; digits=1))\" fill=\"rgba(255,255,255,0.88)\" stroke=\"#334155\" stroke-width=\"1.1\"/>")
+    write(io, "<circle cx=\"$cx\" cy=\"$cy\" r=\"$(round(rmax * 0.5; digits=1))\" fill=\"none\" stroke=\"#94a3b8\" stroke-width=\"0.6\" stroke-dasharray=\"2,2\"/>")
+    write(io, "<line x1=\"$cx\" y1=\"$(round(cy - rmax; digits=1))\" x2=\"$cx\" y2=\"$(round(cy + rmax; digits=1))\" stroke=\"#94a3b8\" stroke-width=\"0.6\"/>")
+    write(io, "<line x1=\"$(round(cx - rmax; digits=1))\" y1=\"$cy\" x2=\"$(round(cx + rmax; digits=1))\" y2=\"$cy\" stroke=\"#94a3b8\" stroke-width=\"0.6\"/>")
+
+    for s in 1:n_sec
+        counts[s] == 0 && continue
+        r = max(2.0, (counts[s] / cmax) * rmax)
+        a1 = deg2rad((s - 1) * sec_w - 90.0)
+        a2 = deg2rad(s * sec_w - 90.0)
+        x1, y1 = cx + r * cos(a1), cy + r * sin(a1)
+        x2, y2 = cx + r * cos(a2), cy + r * sin(a2)
+        write(io, "<path d=\"M $cx $cy L $(round(x1; digits=1)) $(round(y1; digits=1)) A $(round(r; digits=1)) $(round(r; digits=1)) 0 0 1 $(round(x2; digits=1)) $(round(y2; digits=1)) Z\" fill=\"$petal_fill\" fill-opacity=\"0.78\" stroke=\"$petal_stroke\" stroke-width=\"0.8\"/>")
+    end
+
+    if isfinite(mean_bearing_deg) && r_bar > 0.02
+        ang = deg2rad(Float64(mean_bearing_deg) - 90.0)
+        r_vec = (0.25 + 0.72 * min(1.0, Float64(r_bar))) * rmax
+        tx = cx + r_vec * cos(ang)
+        ty = cy + r_vec * sin(ang)
+        write(io, "<line x1=\"$cx\" y1=\"$cy\" x2=\"$(round(tx; digits=1))\" y2=\"$(round(ty; digits=1))\" stroke=\"#dc2626\" stroke-width=\"2.0\"/>")
+        write(io, "<circle cx=\"$(round(tx; digits=1))\" cy=\"$(round(ty; digits=1))\" r=\"2.3\" fill=\"#dc2626\"/>")
+    end
+    write(io, "</svg>")
+    return String(take!(io))
+end
+
+function _serialize_map_roses_json(spatial_roses)::String
+    (spatial_roses === nothing || !hasproperty(spatial_roses, :cells) ||
+     isempty(spatial_roses.cells)) && return "[]"
+    items = String[]
+    for c in spatial_roses.cells
+        lat = round(Float64(c.center_lat); digits = 5)
+        lon = round(Float64(c.center_lon); digits = 5)
+        brg = Float64(c.mean_bearing_deg)
+        r_bar = Float64(c.mean_vector_length)
+        pval = Float64(c.rayleigh_p)
+        svg = _js_escape(_svg_map_polar_rose(c.sector_counts, brg, r_bar, pval; size_px = 76))
+        popup = _js_escape(
+            "<b>100 &times; 100 km Sector: $(_html_escape(c.sector_label))</b><br>" *
+            "Events (n): <b>$(c.n_events)</b> &middot; Mean disp.: <b>$(round(c.mean_disp_km; digits=1)) km</b><br>" *
+            "Mean bearing &theta;&#772;: <b>$(round(brg; digits=1))&deg;</b> &middot; Resultant R&#772;: <b>$(round(r_bar; digits=3))</b><br>" *
+            "von Mises &kappa;: <b>$(round(c.kappa; digits=2))</b> &middot; Rayleigh Z: <b>$(round(c.rayleigh_z; digits=1))</b> (p = $(round(pval; digits=4)))"
+        )
+        push!(items, "{\"lat\":$lat,\"lon\":$lon,\"svg\":\"$svg\",\"p\":\"$popup\"}")
+    end
+    return "[" * join(items, ",") * "]"
+end
+
+function _serialize_flux_arrows_json(domain_bottlenecks)::String
+    (domain_bottlenecks === nothing ||
+     !hasproperty(domain_bottlenecks, :directed_flux) ||
+     domain_bottlenecks.directed_flux === nothing) && return "[]"
+    df = domain_bottlenecks.directed_flux
+    edges = hasproperty(df, :top_edges) ? df.top_edges : nothing
+    edges === nothing && return "[]"
+    rows_iter = edges isa DataFrame ? eachrow(edges) : edges
+    (edges isa DataFrame ? nrow(edges) == 0 : isempty(edges)) && return "[]"
+    max_f = maximum(Float64(e.net_flux) for e in rows_iter)
+    max_f <= 0.0 && return "[]"
+    items = String[]
+    for e in rows_iter
+        nf = Float64(e.net_flux)
+        w = round(1.2 + 3.2 * sqrt(nf / max_f); digits = 2)
+        op = round(0.45 + 0.45 * sqrt(nf / max_f); digits = 2)
+        info = _js_escape("Net Flux: Unit $(e.u) -> Unit $(e.v) ($(round(nf; digits=2)))")
+        push!(items,
+            "{\"a\":[$(round(Float64(e.u_lat); digits=5)),$(round(Float64(e.u_lon); digits=5))]," *
+            "\"b\":[$(round(Float64(e.v_lat); digits=5)),$(round(Float64(e.v_lon); digits=5))]," *
+            "\"w\":$w,\"o\":$op,\"p\":\"$info\"}"
+        )
+    end
+    return "[" * join(items, ",") * "]"
+end
+
+function _serialize_smooth_events_json(smooth_events::AbstractVector)::Tuple{String, String}
+    bin_counts = zeros(Int, length(LIBERTY_BIN_SPECS))
+    items = Vector{String}(undef, length(smooth_events))
+    for (idx, ev) in enumerate(smooth_events)
+        b = clamp(Int(ev.liberty_bin), 1, length(LIBERTY_BIN_SPECS))
+        bin_counts[b] += 1
+        pts = join([
+            "[$(round(Float64(pt[2]); digits=5)),$(round(Float64(pt[1]); digits=5))]"
+            for pt in ev.coords
+        ], ",")
+        yrs = round(Float64(ev.liberty_days) / 365.25; digits = 2)
+        days_r = round(Float64(ev.liberty_days); digits = 1)
+        disp_r = round(Float64(ev.displacement_km); digits = 1)
+        plen_r = round(Float64(ev.path_length_km); digits = 1)
+        # Precompute directional arrowhead anchor (~62% cumulative arc length)
+        n_pts = length(ev.coords)
+        ah_idx = 0
+        if n_pts >= 2 && (ev.coords[1] != ev.coords[end])
+            seg_l = zeros(Float64, n_pts)
+            for k_p in 2:n_pts
+                seg_l[k_p] = seg_l[k_p - 1] + hypot(
+                    Float64(ev.coords[k_p][1]) - Float64(ev.coords[k_p - 1][1]),
+                    Float64(ev.coords[k_p][2]) - Float64(ev.coords[k_p - 1][2])
+                )
+            end
+            if seg_l[end] > 1e-5
+                ah_idx = clamp(searchsortedfirst(seg_l, 0.62 * seg_l[end]), 2, n_pts) - 1
+            end
+        end
+        info = _js_escape(
+            "<b>Tag $(_html_escape(ev.tagid))</b> ($(_html_escape(ev.datasource)), Event #$(ev.event_id))<br>" *
+            "Time between mark &amp; recapture: <b>$(days_r) d</b> ($(yrs) yr &middot; $(_html_escape(ev.liberty_label)))<br>" *
+            "Net displacement: <b>$(disp_r) km</b> &middot; Spline trajectory: <b>$(plen_r) km</b><br>" *
+            "Mark/release epoch: $(ev.rel_time_str)"
+        )
+        items[idx] = "{\"i\":$(ev.event_id),\"b\":$b,\"k\":\"$(ev.color)\"," *
+                     "\"d\":$disp_r,\"l\":$plen_r,\"t\":$days_r,\"a\":$ah_idx,\"c\":[$pts],\"p\":\"$info\"}"
+    end
+    bins_json = "[" * join([
+        "{\"b\":$(sp.idx),\"lbl\":\"$(_js_escape(sp.label))\",\"k\":\"$(sp.color)\",\"n\":$(bin_counts[sp.idx])}"
+        for sp in LIBERTY_BIN_SPECS
+    ], ",") * "]"
+    return ("[" * join(items, ",") * "]", bins_json)
+end
+
+function _export_consolidated_dashboard_html(
+    filepath::AbstractString,
+    loaded,
+    kernels,
+    path_results,
+    diagnostics,
+    params,
+    validation,
+    paths_rich::Vector,
+    ag_paths::Vector,
+    agent_space_use,
+    mov_stats,
+    phenology,
+    trait_models;
+    bathy_mig = nothing,
+    disp_diag = nothing,
+    bio_strat = nothing,
+    spatial_roses = nothing,
+    taxis_proj = nothing,
+    smooth_events = NamedTuple[]
+)::String
+    mkpath(dirname(filepath))
+    mesh = loaded.mesh
+    polys = hasproperty(mesh, :polygons_lonlat) ? mesh.polygons_lonlat :
+            (hasproperty(mesh, :polygons) ? mesh.polygons : nothing)
+    cents = hasproperty(mesh, :centroids_lonlat) ? mesh.centroids_lonlat :
+            (hasproperty(mesh, :centroids) ? mesh.centroids : Tuple{Float64, Float64}[])
+    isempty(cents) && error("Mesh has no geographic centroids for HTML export.")
+
+    n_units = length(cents)
+    land_mask = hasproperty(loaded, :land_mask) ? loaded.land_mask : nothing
+
+    marine_indices = Int[]
+    shared_cells_json = String[]
+
+    for i in 1:n_units
+        is_land = land_mask !== nothing && i <= length(land_mask) && Bool(land_mask[i])
+        is_land && continue
+        lat = round(Float64(cents[i][2]); digits = 5)
+        lon = round(Float64(cents[i][1]); digits = 5)
+        has_poly = polys !== nothing && i <= length(polys) && length(polys[i]) >= 3
+        push!(marine_indices, i)
+        if has_poly
+            coords = join(["[$(round(Float64(pt[2]); digits=5)),$(round(Float64(pt[1]); digits=5))]" for pt in polys[i]], ",")
+            push!(shared_cells_json, "{\"u\":$i,\"pt\":[$lat,$lon],\"c\":[$coords]}")
+        else
+            push!(shared_cells_json, "{\"u\":$i,\"pt\":[$lat,$lon]}")
+        end
+    end
+
+    c_lon = round(mean(Float64(cents[u][1]) for u in marine_indices); digits = 4)
+    c_lat = round(mean(Float64(cents[u][2]) for u in marine_indices); digits = 4)
+
+    hsi_field = hasproperty(loaded, :hsi_vec) && length(loaded.hsi_vec) >= n_units ?
+        loaded.hsi_vec : fill(0.5, n_units)
+
+    # Assemble map tab definitions (Smoothed Trajectories first as the default tab)
+    map_layers_json = String[]
+
+    # Tab 1 (Default): Smoothed All-Event Mark-Recapture Trajectories
+    if !isempty(smooth_events)
+        sm_bg = (hasproperty(loaded, :resharded_depths) && loaded.resharded_depths !== nothing &&
+                 length(loaded.resharded_depths) >= n_units) ? loaded.resharded_depths : hsi_field
+        push!(map_layers_json, _encode_field_layer_json(
+            "smoothed_all", "Smoothed Trajectories",
+            "$(params.species_name) — Smoothed Predicted Trajectories ($(length(smooth_events)) Events by Time Between Mark and Recapture)",
+            "Time Between Mark and Recapture", marine_indices, sm_bg;
+            cmap = :viridis, scale_mode = :linear, tracks_key = "smooth"
+        ))
+    end
+
+    # Tab 2: Paths & HSI
+    push!(map_layers_json, _encode_field_layer_json(
+        "paths", "Paths & HSI",
+        "$(params.species_name) — Reconstructed Trajectories & Habitat Suitability",
+        "Habitat Suitability (HSI)", marine_indices, hsi_field;
+        cmap = params.cmap, scale_mode = :linear, tracks_key = "recon"
+    ))
+
+    # Tab 2: Corridors
+    corr_vec = zeros(Float64, n_units)
+    if hasproperty(path_results, :corridors) && path_results.corridors !== nothing && !isempty(path_results.corridors)
+        for cv in values(path_results.corridors)
+            if cv isa AbstractVector && length(cv) >= n_units
+                for i in 1:n_units
+                    corr_vec[i] += Float64(cv[i])
+                end
+            elseif cv isa AbstractMatrix && size(cv, 1) == n_units
+                if size(cv, 2) == n_units
+                    # Recover nodal intensity from legacy outer-product corridor matrix
+                    for i in 1:n_units
+                        corr_vec[i] += sqrt(max(0.0, Float64(cv[i, i])))
+                    end
+                else
+                    col_rng = size(cv, 2) >= 3 ? (2:(size(cv, 2) - 1)) : (1:size(cv, 2))
+                    for col in col_rng
+                        for i in 1:n_units
+                            corr_vec[i] += Float64(cv[i, col]) / length(col_rng)
+                        end
+                    end
+                end
+            end
+        end
+    end
+    if maximum(corr_vec; init = 0.0) <= 1e-12 && mov_stats !== nothing &&
+       length(mov_stats.residence_time_per_patch) >= n_units
+        for i in 1:n_units
+            corr_vec[i] = Float64(mov_stats.residence_time_per_patch[i])
+        end
+    end
+    corr_pos = filter(>(0.0), corr_vec[marine_indices])
+    corr_hi_thresh = isempty(corr_pos) ? Inf : quantile(corr_pos, 0.92)
+    corr_hi_mask = [corr_vec[u] >= corr_hi_thresh && corr_vec[u] > 0.0 for u in 1:n_units]
+    push!(map_layers_json, _encode_field_layer_json(
+        "corridors", "Corridors",
+        "$(params.species_name) — Cumulative Markov Bridge Transit Corridors",
+        "Corridor Transit Density", marine_indices, corr_vec;
+        cmap = :inferno, scale_mode = :sqrt_p99, tracks_key = "recon",
+        highlight_mask = corr_hi_mask, highlight_label = "Core Corridor"
+    ))
+
+    # Tab 3: Directed Flux & Structural Bottlenecks
+    if hasproperty(path_results, :domain_bottlenecks) && path_results.domain_bottlenecks !== nothing
+        db = path_results.domain_bottlenecks
+        push!(map_layers_json, _encode_field_layer_json(
+            "bottlenecks", "Directed Flux & Bottlenecks",
+            "$(params.species_name) — Net Directed Migration Flux & Structural Bottlenecks B(u)",
+            "Bottleneck Index B(u)", marine_indices, db.bottleneck_score;
+            cmap = :plasma, scale_mode = :sqrt_p99, tracks_key = "flux",
+            highlight_mask = db.bottleneck_mask, highlight_label = "Bottleneck"
+        ))
+    end
+
+    # Tab 3b: Spatial Corridor Canalization, Step Entropy, & 100 km Compass Roses
+    if validation !== nothing && hasproperty(validation, :corridor_canalization) &&
+       validation.corridor_canalization !== nothing
+        cc = validation.corridor_canalization
+        push!(map_layers_json, _encode_field_layer_json(
+            "canalization", "Corridor Canalization",
+            "$(params.species_name) — Spatial Corridor Canalization Index K(u) & Conduits",
+            "Canalization Index K(u)", marine_indices, cc.canalization_index;
+            cmap = :inferno, scale_mode = :sqrt_p99, tracks_key = "none",
+            highlight_mask = cc.conduit_mask, highlight_label = "Conduit"
+        ))
+        push!(map_layers_json, _encode_field_layer_json(
+            "entropy", "Step Entropy",
+            "$(params.species_name) — Outgoing Marine Step Entropy H(u)",
+            "Normalized Step Entropy H(u)", marine_indices, cc.step_entropy;
+            cmap = :viridis, scale_mode = :linear, tracks_key = "none"
+        ))
+    end
+    if spatial_roses !== nothing && hasproperty(spatial_roses, :cells) && !isempty(spatial_roses.cells)
+        rose_bg = (hasproperty(loaded, :resharded_depths) && loaded.resharded_depths !== nothing &&
+                   length(loaded.resharded_depths) >= n_units) ? loaded.resharded_depths : hsi_field
+        rose_bg_lbl = (hasproperty(loaded, :resharded_depths) && loaded.resharded_depths !== nothing) ?
+            "Bathymetric Depth (m)" : "Habitat Suitability (HSI)"
+        push!(map_layers_json, _encode_field_layer_json(
+            "bearing_roses", "Compass Bearing Roses (100 km)",
+            "$(params.species_name) — Spatially Discretized 100 x 100 km Compass Bearing Roses & Rayleigh Tests",
+            rose_bg_lbl, marine_indices, rose_bg;
+            cmap = :viridis, scale_mode = :linear, tracks_key = "roses"
+        ))
+    end
+
+    # Tab 4: Circuit Current Density
+    if diagnostics !== nothing && hasproperty(diagnostics, :circuit) && diagnostics.circuit !== nothing
+        circ = diagnostics.circuit
+        pmask = hasproperty(circ, :robust_mask) ? circ.robust_mask : circ.pinch_mask
+        push!(map_layers_json, _encode_field_layer_json(
+            "circuit", "Circuit Flow",
+            "$(params.species_name) — Electrical Circuit Current Density & Pinch-Points",
+            "Current Density", marine_indices, circ.current_density;
+            cmap = :plasma, scale_mode = :sqrt_p99, tracks_key = "none",
+            highlight_mask = pmask, highlight_label = "Pinch-Point"
+        ))
+    end
+
+    # Tab 5: Forward Agent Space-Use
+    if agent_space_use !== nothing && hasproperty(agent_space_use, :visit_probability)
+        push!(map_layers_json, _encode_field_layer_json(
+            "agents", "Agent Space-Use",
+            "$(params.species_name) — Forward-Projected Agent Visitation Probability",
+            "Visit Probability", marine_indices, agent_space_use.visit_probability;
+            cmap = :viridis, scale_mode = :sqrt_p99, tracks_key = "agent"
+        ))
+    end
+
+    # Tab 6: Tessellation & Depth
+    depth_field = hasproperty(loaded, :resharded_depths) && loaded.resharded_depths !== nothing &&
+                  length(loaded.resharded_depths) >= n_units ?
+        loaded.resharded_depths : hsi_field
+    depth_label = (hasproperty(loaded, :resharded_depths) && loaded.resharded_depths !== nothing) ?
+        "Bathymetric Depth (m)" : "Habitat Suitability (HSI)"
+    push!(map_layers_json, _encode_field_layer_json(
+        "tessellation", "Tessellation & Depth",
+        "$(params.species_name) — Spatial Hexagonal Tessellation ($(length(marine_indices)) Marine Units)",
+        depth_label, marine_indices, depth_field;
+        cmap = :viridis, scale_mode = :linear, tracks_key = "none"
+    ))
+
+    recon_tracks_js = _serialize_tracks_json(paths_rich)
+    agent_tracks_js = _serialize_tracks_json(ag_paths)
+    flux_arrows_js  = _serialize_flux_arrows_json(
+        hasproperty(path_results, :domain_bottlenecks) ? path_results.domain_bottlenecks : nothing
+    )
+    map_roses_js    = _serialize_map_roses_json(spatial_roses)
+    smooth_events_js, interval_bins_js = _serialize_smooth_events_json(smooth_events)
+
+    payload_json = "{" *
+        "\"shared_cells\":[$(join(shared_cells_json, ","))]," *
+        "\"map_layers\":[$(join(map_layers_json, ","))]," *
+        "\"flux_arrows\":$flux_arrows_js," *
+        "\"map_roses\":$map_roses_js," *
+        "\"smooth_events\":$smooth_events_js," *
+        "\"interval_bins\":$interval_bins_js," *
+        "\"track_sets\":{\"recon\":$recon_tracks_js,\"agent\":$agent_tracks_js," *
+        "\"flux\":[],\"roses\":[],\"smooth\":[],\"none\":[]}" *
+        "}"
+    sidecar_path = replace(String(filepath), r"\.html?$"i => "") * ".data.zz"
+    sidecar_name = basename(sidecar_path)
+    sidecar_name_js = _js_escape(sidecar_name)
+    raw_bytes = Vector{UInt8}(codeunits(payload_json))
+    compressed_bytes = transcode(ZlibCompressor(level = 7), raw_bytes)
+    write(sidecar_path, compressed_bytes)
+    analysis_html = _path_analysis_inner_html(
+        kernels, paths_rich, mov_stats, phenology, trait_models;
+        bathy_mig = bathy_mig, disp_diag = disp_diag, bio_strat = bio_strat,
+        spatial_roses = spatial_roses, taxis_proj = taxis_proj,
+        validation = validation
+    )
+    has_ppc = validation !== nothing && hasproperty(validation, :posterior_predictive) &&
+              validation.posterior_predictive !== nothing
+    ppc_html = has_ppc ? _ppc_inner_html(validation.posterior_predictive) : ""
+    ppc_tab_btn = has_ppc ?
+        "<button class=\"tab-btn\" data-kind=\"report\" data-target=\"ppc-pane\">Posterior Predictive (PPC)</button>" : ""
+    ppc_pane_div = has_ppc ?
+        "<div id=\"ppc-pane\" class=\"report-pane\"><div class=\"wrap\">$ppc_html</div></div>" : ""
+
+    dark = params.dark_mode
+    bg = dark ? "#0f172a" : "#f1f5f9"
+    nav_bg = dark ? "#020617" : "#0f172a"
+    card = dark ? "#1e293b" : "#ffffff"
+    fg = dark ? "#e2e8f0" : "#1e293b"
+    muted = dark ? "#94a3b8" : "#64748b"
+    bdr = dark ? "#334155" : "#cbd5e1"
+    panel_bg = dark ? "rgba(15,23,42,0.92)" : "rgba(255,255,255,0.94)"
+    ocean_canvas = dark ? "#0c2340" : "#dbeafe"
+
+    html = """
+    <!DOCTYPE html>
+    <html lang="en"><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>$(_js_escape(params.species_name)) — TethysPath Movement Dashboard</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.min.css"
+          onerror="this.onerror=null;this.href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';"/>
+    <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.min.js"
+            onerror="var s=document.createElement('script');s.src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';document.head.appendChild(s);"></script>
+    <style>
+      * { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: $bg; color: $fg;
+                   font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; overflow: hidden; }
+      .topbar { height: 48px; background: $nav_bg; color: #f8fafc; display: flex; align-items: center;
+                padding: 0 16px; gap: 6px; border-bottom: 1px solid #1e293b; overflow-x: auto; white-space: nowrap; }
+      .brand { font-weight: 700; font-size: 14px; margin-right: 12px; color: #38bdf8; letter-spacing: 0.02em; }
+      .tab-btn { background: transparent; color: #cbd5e1; border: 1px solid transparent; padding: 6px 12px;
+                 border-radius: 6px; font-size: 12.5px; font-weight: 500; cursor: pointer; transition: all 0.15s; }
+      .tab-btn:hover { background: rgba(255,255,255,0.08); color: #ffffff; }
+      .tab-btn.active { background: #0284c7; color: #ffffff; font-weight: 600; }
+      .stage { position: relative; width: 100%; height: calc(100% - 48px); }
+      #map-pane { width: 100%; height: 100%; position: relative; }
+      #map { width: 100%; height: 100%; background: $ocean_canvas; }
+      .report-pane { display: none; width: 100%; height: 100%; overflow-y: auto; padding: 24px; background: $bg; }
+      .wrap { max-width: 1200px; margin: 0 auto; }
+      h2 { font-size: 15.5px; margin: 0 0 12px 0; border-bottom: 1px solid $bdr; padding-bottom: 6px; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 16px; margin-bottom: 18px; }
+      .card { background: $card; border: 1px solid $bdr; border-radius: 10px; padding: 16px; }
+      table { width: 100%; border-collapse: collapse; font-size: 13px; }
+      th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid $bdr; }
+      th { color: $muted; font-weight: 600; }
+      .left-dock { position: absolute; top: 12px; left: 12px; z-index: 1000; width: 294px;
+                   max-height: calc(100% - 24px); overflow-y: auto; display: flex;
+                   flex-direction: column; gap: 10px; }
+      .info-panel { background: $panel_bg; color: $fg; padding: 10px 13px; border-radius: 8px;
+                    box-shadow: 0 2px 10px rgba(0,0,0,0.2); border: 1px solid $bdr; }
+      .info-panel h3 { margin: 0 0 4px 0; font-size: 13.5px; line-height: 1.3; }
+      .info-panel .sub { font-size: 11.5px; color: $muted; line-height: 1.35; }
+      .legend-box { background: $panel_bg; color: $fg; padding: 10px 13px; border-radius: 8px;
+                    box-shadow: 0 2px 10px rgba(0,0,0,0.2); font-size: 12px; border: 1px solid $bdr; }
+      .grad-bar { height: 12px; width: 100%; border-radius: 3px; margin: 6px 0 4px 0; }
+      .grad-labels { display: flex; justify-content: space-between; font-family: monospace; font-size: 11px; }
+      .swatch-list { display: none; flex-direction: column; gap: 4px; margin-top: 6px; font-size: 11.5px; }
+      .swatch-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+      .swatch-left { display: flex; align-items: center; gap: 6px; }
+      .swatch-line { width: 18px; height: 3px; border-radius: 2px; display: inline-block; }
+      .symbol-legend { display: none; flex-direction: column; gap: 5px; margin-top: 8px;
+                       padding-top: 8px; border-top: 1px solid $bdr; font-size: 11.5px; }
+      .symbol-legend-hdr { font-weight: 600; font-size: 11px; color: $muted; text-transform: uppercase;
+                           letter-spacing: 0.03em; margin-bottom: 1px; }
+      .smooth-dock { display: none; background: $panel_bg; color: $fg; padding: 11px 13px;
+                     border-radius: 8px; box-shadow: 0 2px 12px rgba(0,0,0,0.22); font-size: 12px;
+                     border: 1px solid $bdr; }
+      .smooth-dock h4 { margin: 0 0 8px 0; font-size: 12.5px; color: #0284c7; letter-spacing: 0.02em; }
+      .smooth-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 7px; }
+      .smooth-chk-row { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; font-size: 11.5px; cursor: pointer; }
+      .smooth-input, .smooth-select { background: $card; color: $fg; border: 1px solid $bdr;
+                                      border-radius: 5px; padding: 3px 6px; font-size: 12px; }
+      .smooth-btn { background: #0284c7; color: #ffffff; border: none; border-radius: 5px;
+                    padding: 4px 9px; font-size: 11.5px; font-weight: 600; cursor: pointer; }
+      .smooth-btn:hover { background: #0369a1; }
+      .smooth-stat { margin-top: 6px; padding-top: 6px; border-top: 1px solid $bdr;
+                     font-size: 11px; color: $muted; line-height: 1.38; }
+      .rose-marker { background: transparent; border: none; }
+      .rose-marker svg { filter: drop-shadow(0 2px 4px rgba(15,23,42,0.35)); transition: transform 0.15s; }
+      .rose-marker:hover svg { transform: scale(1.18); }
+      #data-loader-overlay { position: fixed; inset: 0; z-index: 2500; display: flex;
+                             align-items: center; justify-content: center;
+                             background: rgba(15, 23, 42, 0.84); backdrop-filter: blur(5px); }
+      #data-loader-overlay.hidden { display: none; }
+      .loader-card { background: $card; color: $fg; border: 1px solid $bdr; border-radius: 10px;
+                     padding: 20px 24px; max-width: 440px; width: 90%;
+                     box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45); text-align: center; }
+      .loader-title { font-size: 15px; font-weight: 600; color: #0284c7; margin-bottom: 8px; }
+      .loader-status { font-size: 12.5px; color: $muted; line-height: 1.45; margin-bottom: 12px; }
+      .loader-btn { display: inline-block; padding: 8px 14px; border-radius: 6px;
+                    border: 1px solid #0284c7; background: rgba(2, 132, 199, 0.14);
+                    color: $fg; font-size: 12.5px; font-weight: 600; cursor: pointer; }
+      .loader-btn:hover { background: rgba(2, 132, 199, 0.25); }
+    </style></head><body>
+    <div class="topbar" id="tab-bar">
+      <span class="brand">TethysPath · $(_js_escape(params.species_name))</span>
+      <span id="map-tab-buttons" style="display:flex;gap:5px;"></span>
+      <button class="tab-btn" data-kind="report" data-target="analysis-pane">Path Analysis &amp; Diagnostics</button>
+      $ppc_tab_btn
+    </div>
+
+    <div class="stage">
+      <div id="map-pane">
+        <div id="map"></div>
+        <div id="left-dock" class="left-dock">
+          <div class="info-panel">
+            <h3 id="map-title">Loading...</h3>
+            <div class="sub" id="map-subtitle"></div>
+          </div>
+          <div class="legend-box">
+            <div id="legend-label" style="font-weight:600;">Value</div>
+            <div id="legend-grad-wrap">
+              <div id="legend-bar" class="grad-bar"></div>
+              <div class="grad-labels">
+                <span id="legend-min">0</span>
+                <span id="legend-mid">0.5</span>
+                <span id="legend-max">1</span>
+              </div>
+            </div>
+            <div id="legend-swatches" class="swatch-list"></div>
+            <div id="legend-symbols" class="symbol-legend">
+              <div class="symbol-legend-hdr">Markers &amp; Orientation</div>
+              <div class="swatch-left">
+                <svg width="16" height="14" viewBox="0 0 16 14"><circle cx="8" cy="7" r="4.2" fill="#22c55e" stroke="#064e3b" stroke-width="1.3"/></svg>
+                <span>Mark / Release (point)</span>
+              </div>
+              <div class="swatch-left">
+                <svg width="16" height="14" viewBox="0 0 16 14"><polygon points="8,1 9.9,5.0 14.3,5.5 11.0,8.5 11.9,12.8 8,10.6 4.1,12.8 5.0,8.5 1.7,5.5 6.1,5.0" fill="#f59e0b" stroke="#78350f" stroke-width="0.9"/></svg>
+                <span>Recapture (star)</span>
+              </div>
+              <div class="swatch-left">
+                <svg width="16" height="14" viewBox="0 0 16 14"><line x1="1" y1="7" x2="11" y2="7" stroke="#0284c7" stroke-width="1.8"/><polygon points="15,7 8.5,3.5 10.3,7 8.5,10.5" fill="#0284c7"/></svg>
+                <span>Direction of Movement (arrowhead)</span>
+              </div>
+            </div>
+          </div>
+          <div id="smooth-controls-dock" class="smooth-dock">
+            <h4>Trajectory Controls &amp; Selection</h4>
+            <div class="smooth-row">
+              <span>Highlight Paths (<i>n</i>)</span>
+              <div style="display:flex;gap:5px;align-items:center;">
+                <input type="number" id="smooth-n-input" class="smooth-input" style="width:62px;text-align:center;" min="1" max="500" value="15"/>
+                <button type="button" id="smooth-clear-btn" class="smooth-btn">Clear</button>
+              </div>
+            </div>
+            <div class="smooth-row">
+              <span>Click Criterion</span>
+              <select id="smooth-mode-select" class="smooth-select" style="width:152px;">
+                <option value="release" selected>Nearest Marks / Releases</option>
+                <option value="any">Area Pass-Through</option>
+                <option value="recapture">Nearest Recaptures</option>
+              </select>
+            </div>
+            <div class="smooth-row">
+              <span>Time Interval</span>
+              <select id="smooth-bin-select" class="smooth-select" style="width:152px;">
+                <option value="0">All Intervals</option>
+                <option value="1">&lt; 1 month</option>
+                <option value="2">1 mo - 1 yr</option>
+                <option value="3">1 - 2 yr</option>
+                <option value="4">2 - 3 yr</option>
+                <option value="5">3 - 4 yr</option>
+                <option value="6">&ge; 4 yr</option>
+              </select>
+            </div>
+            <div class="smooth-row">
+              <span>Base Opacity</span>
+              <input type="range" id="smooth-alpha-slider" min="5" max="85" value="28" style="width:110px;"/>
+              <span id="smooth-alpha-val" style="font-family:monospace;font-size:11px;width:32px;text-align:right;">28%</span>
+            </div>
+            <label class="smooth-chk-row">
+              <input type="checkbox" id="smooth-show-endpoints" checked/>
+              <span>Show Mark (point) &amp; Recapture (star)</span>
+            </label>
+            <label class="smooth-chk-row">
+              <input type="checkbox" id="smooth-show-arrows" checked/>
+              <span>Show Movement Direction Arrowheads</span>
+            </label>
+            <div id="smooth-status" class="smooth-stat">
+              Click anywhere on the map to highlight the <i>n</i> nearest smoothed trajectories (press Esc to clear).
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="analysis-pane" class="report-pane">
+        <div class="wrap">$analysis_html</div>
+      </div>
+      $ppc_pane_div
+    </div>
+
+    <div id="data-loader-overlay">
+      <div class="loader-card">
+        <div class="loader-title">Loading Movement Dashboard Payload</div>
+        <div class="loader-status" id="loader-status">Fetching $(_html_escape(sidecar_name))...</div>
+        <div id="loader-picker" style="display:none;">
+          <input type="file" id="sidecar-file-input" accept=".zz,.bin,.gz" style="display:none;"/>
+          <label for="sidecar-file-input" class="loader-btn">Select $(_html_escape(sidecar_name))</label>
+        </div>
+      </div>
+    </div>
+
+    <script>
+    const SIDECAR_FILE = "$sidecar_name_js";
+    let SHARED_CELLS = [];
+    let MAP_LAYERS = [];
+    let FLUX_ARROWS = [];
+    let MAP_ROSES = [];
+    let SMOOTH_EVENTS = [];
+    let INTERVAL_BINS = [];
+    let TRACK_SETS = {recon: [], agent: [], flux: [], roses: [], smooth: [], none: []};
+
+    function bootDashboard(payload) {
+      if (typeof L === 'undefined') {
+        setTimeout(function() { bootDashboard(payload); }, 80);
+        return;
+      }
+      SHARED_CELLS = payload.shared_cells || [];
+      MAP_LAYERS = payload.map_layers || [];
+      FLUX_ARROWS = payload.flux_arrows || [];
+      MAP_ROSES = payload.map_roses || [];
+      SMOOTH_EVENTS = payload.smooth_events || [];
+      INTERVAL_BINS = payload.interval_bins || [];
+      TRACK_SETS = payload.track_sets || TRACK_SETS;
+
+      const map = L.map('map', {preferCanvas: true, zoomControl: false}).setView([$c_lat, $c_lon], 6);
+      L.control.zoom({position: 'topright'}).addTo(map);
+
+      // Keyless public basemaps compatible with local file:// protocol (no API keys required)
+      const esriOcean = L.layerGroup([
+        L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}', {
+          maxZoom: 13, attribution: 'Tiles &copy; Esri — GEBCO, NOAA, CHS, OSU'
+        }),
+        L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Reference/MapServer/tile/{z}/{y}/{x}', {
+          maxZoom: 13, opacity: 0.75
+        })
+      ]).addTo(map);
+
+      const esriPhysical = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Physical_Map/MapServer/tile/{z}/{y}/{x}', {
+        maxZoom: 8, attribution: 'Tiles &copy; Esri — US National Park Service'
+      });
+
+      const esriGray = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/$(dark ? "World_Dark_Gray_Base" : "World_Light_Gray_Base")/MapServer/tile/{z}/{y}/{x}', {
+        maxZoom: 14, attribution: 'Tiles &copy; Esri'
+      });
+
+      const esriImagery = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+        maxZoom: 15, attribution: 'Tiles &copy; Esri'
+      });
+
+      const offlineBlank = L.layerGroup();
+
+      // Optional coordinate graticule (unchecked by default; no land polygons drawn)
+      const graticuleLayer = L.layerGroup();
+      for (let lon = -72; lon <= -52; lon += 2) {
+        L.polyline([[39, lon], [51, lon]], {color: '#94a3b8', weight: 0.5, opacity: 0.35, dashArray: '3,4', interactive: false}).addTo(graticuleLayer);
+      }
+      for (let lat = 40; lat <= 50; lat += 2) {
+        L.polyline([[lat, -72], [lat, -52]], {color: '#94a3b8', weight: 0.5, opacity: 0.35, dashArray: '3,4', interactive: false}).addTo(graticuleLayer);
+      }
+
+      const fieldLayer = L.layerGroup().addTo(map);
+      const smoothBgLayer = L.layerGroup().addTo(map);
+      const smoothHiLayer = L.layerGroup().addTo(map);
+      const smoothPinLayer = L.layerGroup().addTo(map);
+      const trackLayer = L.layerGroup().addTo(map);
+      const fluxLayer = L.layerGroup().addTo(map);
+      const roseLayer = L.layerGroup().addTo(map);
+      const endpointLayer = L.layerGroup().addTo(map);
+      const highlightLayer = L.layerGroup().addTo(map);
+      const smoothCanvas = L.canvas({padding: 0.5});
+
+      // Custom pixel-space 5-point StarMarker and tangent ArrowHeadMarker on Leaflet Canvas
+      const StarMarker = L.CircleMarker.extend({
+        _updatePath: function() {
+          const rdr = this._renderer;
+          if (!rdr || !rdr._ctx || !rdr._drawing || this._empty()) return;
+          const ctx = rdr._ctx;
+          const p = this._point;
+          const R = Math.max(this._radius, 2.2);
+          const r = R * 0.44;
+          ctx.beginPath();
+          for (let k = 0; k < 10; k++) {
+            const rad = (k % 2 === 0) ? R : r;
+            const ang = -Math.PI * 0.5 + k * (Math.PI / 5.0);
+            const x = p.x + rad * Math.cos(ang);
+            const y = p.y + rad * Math.sin(ang);
+            if (k === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          }
+          ctx.closePath();
+          rdr._fillStroke(ctx, this);
+        }
+      });
+
+      const ArrowHeadMarker = L.CircleMarker.extend({
+        _updatePath: function() {
+          const rdr = this._renderer;
+          if (!rdr || !rdr._ctx || !rdr._drawing || this._empty() || !this._map) return;
+          const p1 = this._map.latLngToLayerPoint(this.options.pPrev);
+          const p2 = this._map.latLngToLayerPoint(this.options.pNext);
+          const dx = p2.x - p1.x;
+          const dy = p2.y - p1.y;
+          if (dx * dx + dy * dy < 0.25) return;
+          const ang = Math.atan2(dy, dx);
+          const ctx = rdr._ctx;
+          const p = this._point;
+          const sz = Math.max(this._radius, 2.5);
+          const ca = Math.cos(ang), sa = Math.sin(ang);
+          ctx.beginPath();
+          ctx.moveTo(p.x + ca * sz * 0.88, p.y + sa * sz * 0.88);
+          ctx.lineTo(p.x - ca * sz * 0.72 - sa * sz * 0.62, p.y - sa * sz * 0.72 + ca * sz * 0.62);
+          ctx.lineTo(p.x - ca * sz * 0.28, p.y - sa * sz * 0.28);
+          ctx.lineTo(p.x - ca * sz * 0.72 + sa * sz * 0.62, p.y - sa * sz * 0.72 - ca * sz * 0.62);
+          ctx.closePath();
+          rdr._fillStroke(ctx, this);
+        }
+      });
+
+      L.control.layers(
+        {
+          "Esri Ocean Basemap (No API Key)": esriOcean,
+          "Esri Physical Relief (No API Key)": esriPhysical,
+          "Esri Gray Canvas (No API Key)": esriGray,
+          "Esri Satellite Imagery (No API Key)": esriImagery,
+          "Blank Ocean Canvas": offlineBlank
+        },
+        {
+          "Hexagonal Marine Field": fieldLayer,
+          "Smoothed All-Event Trajectories": smoothBgLayer,
+          "Highlighted Smoothed Trajectories": smoothHiLayer,
+          "Trajectories": trackLayer,
+          "Net Directed Flux Arrows": fluxLayer,
+          "100 km Compass Bearing Roses": roseLayer,
+          "Mark / Release & Recapture Endpoints": endpointLayer,
+          "Critical Nodes (Bottlenecks / Pinch / Corridors)": highlightLayer,
+          "Lat/Lon Graticule": graticuleLayer
+        },
+        {position: 'topright', collapsed: true}
+      ).addTo(map);
+
+      // Populate time-interval legend swatches
+      const swatchContainer = document.getElementById('legend-swatches');
+      INTERVAL_BINS.forEach(function(b) {
+        const row = document.createElement('div');
+        row.className = 'swatch-row';
+        row.innerHTML = '<span class="swatch-left"><span class="swatch-line" style="background:' +
+          b.k + ';"></span>' + b.lbl + '</span><span style="font-family:monospace;">' + b.n + '</span>';
+        swatchContainer.appendChild(row);
+      });
+
+      const leftDock = document.getElementById('left-dock');
+      if (leftDock && L.DomEvent) {
+        L.DomEvent.disableClickPropagation(leftDock);
+        L.DomEvent.disableScrollPropagation(leftDock);
+      }
+
+      const hiStarIcon = L.divIcon({
+        className: '',
+        html: '<svg width="16" height="16" viewBox="0 0 24 24" style="display:block;filter:drop-shadow(0 1px 2px rgba(0,0,0,0.5));"><polygon points="12,1.8 15.1,8.5 22.4,9.3 17.0,14.2 18.5,21.4 12,17.7 5.5,21.4 7.0,14.2 1.6,9.3 8.9,8.5" fill="#f59e0b" stroke="#78350f" stroke-width="1.6"/></svg>',
+        iconSize: [16, 16],
+        iconAnchor: [8, 8]
+      });
+
+      let activeLayerCfg = null;
+      let smoothPolylines = [];
+      let smoothRelDots = [];
+      let smoothRecStars = [];
+      let smoothDirArrows = [];
+      let smoothBuilt = false;
+      let smoothBaseAlpha = 0.28;
+      let smoothBinFilter = 0;
+      let smoothClickMode = 'release';
+      let smoothHighlightN = 15;
+      let smoothShowEndpoints = true;
+      let smoothShowArrows = true;
+      let smoothSelectedSet = null;
+      let smoothLastClick = null;
+
+      function ensureSmoothPolylines() {
+        if (smoothBuilt) return;
+        smoothBuilt = true;
+        SMOOTH_EVENTS.forEach(function(ev) {
+          const isMoving = ev.c.length >= 2 && (ev.c[0][0] !== ev.c[ev.c.length - 1][0] || ev.c[0][1] !== ev.c[ev.c.length - 1][1]);
+          let shp;
+          if (isMoving) {
+            shp = L.polyline(ev.c, {
+              renderer: smoothCanvas,
+              color: ev.k,
+              weight: 1.6,
+              opacity: smoothBaseAlpha,
+              interactive: false
+            });
+          } else {
+            shp = L.circleMarker(ev.c[0], {
+              renderer: smoothCanvas,
+              radius: 2.0,
+              stroke: false,
+              fillColor: ev.k,
+              fillOpacity: smoothBaseAlpha,
+              interactive: false
+            });
+          }
+          smoothPolylines.push(shp);
+
+          const relDot = L.circleMarker(ev.c[0], {
+            renderer: smoothCanvas,
+            radius: 2.2,
+            color: '#064e3b',
+            weight: 0.6,
+            opacity: smoothBaseAlpha * 0.75,
+            fillColor: '#22c55e',
+            fillOpacity: smoothBaseAlpha * 0.85,
+            interactive: false
+          });
+          smoothRelDots.push(relDot);
+
+          const recStar = new StarMarker(ev.c[ev.c.length - 1], {
+            renderer: smoothCanvas,
+            radius: 3.8,
+            color: '#78350f',
+            weight: 0.6,
+            opacity: smoothBaseAlpha * 0.85,
+            fillColor: '#f59e0b',
+            fillOpacity: Math.min(0.92, smoothBaseAlpha * 1.15),
+            interactive: false
+          });
+          smoothRecStars.push(recStar);
+
+          if (isMoving && ev.a >= 1 && ev.a < ev.c.length) {
+            const pA = ev.c[ev.a - 1];
+            const pB = ev.c[ev.a];
+            const midPt = [0.5 * (pA[0] + pB[0]), 0.5 * (pA[1] + pB[1])];
+            const arr = new ArrowHeadMarker(midPt, {
+              renderer: smoothCanvas,
+              pPrev: pA,
+              pNext: pB,
+              radius: 4.4,
+              stroke: false,
+              fillColor: ev.k,
+              fillOpacity: Math.min(0.92, smoothBaseAlpha * 1.45),
+              interactive: false
+            });
+            smoothDirArrows.push(arr);
+          } else {
+            smoothDirArrows.push(null);
+          }
+        });
+      }
+
+      function haversineKm(lat1, lon1, lat2, lon2) {
+        const toRad = Math.PI / 180.0;
+        const dLat = (lat2 - lat1) * toRad;
+        const dLon = (lon2 - lon1) * toRad;
+        const a = Math.sin(dLat * 0.5) * Math.sin(dLat * 0.5) +
+                  Math.cos(lat1 * toRad) * Math.cos(lat2 * toRad) *
+                  Math.sin(dLon * 0.5) * Math.sin(dLon * 0.5);
+        return 12742.0 * Math.atan2(Math.sqrt(a), Math.sqrt(Math.max(0.0, 1.0 - a)));
+      }
+
+      function minDistToPolylineKm(lat, lon, pts) {
+        const cosLat = Math.cos(lat * Math.PI / 180.0);
+        const ky = 111.132;
+        const kx = 111.320 * cosLat;
+        if (pts.length === 1) {
+          const dx0 = (pts[0][1] - lon) * kx;
+          const dy0 = (pts[0][0] - lat) * ky;
+          return Math.sqrt(dx0 * dx0 + dy0 * dy0);
+        }
+        let best2 = Infinity;
+        for (let k = 1; k < pts.length; k++) {
+          const ax = (pts[k - 1][1] - lon) * kx;
+          const ay = (pts[k - 1][0] - lat) * ky;
+          const bx = (pts[k][1] - lon) * kx;
+          const by = (pts[k][0] - lat) * ky;
+          const dx = bx - ax;
+          const dy = by - ay;
+          const len2 = dx * dx + dy * dy;
+          const t = len2 > 1e-12 ? Math.max(0.0, Math.min(1.0, -(ax * dx + ay * dy) / len2)) : 0.0;
+          const px = ax + t * dx;
+          const py = ay + t * dy;
+          const d2 = px * px + py * py;
+          if (d2 < best2) best2 = d2;
+        }
+        return Math.sqrt(best2);
+      }
+
+      function refreshSmoothDisplay() {
+        if (!activeLayerCfg || activeLayerCfg.tracks !== 'smooth') return;
+        ensureSmoothPolylines();
+        smoothHiLayer.clearLayers();
+        const hasCluster = smoothSelectedSet !== null && smoothSelectedSet.size > 0;
+        const dimAlpha = Math.max(0.02, smoothBaseAlpha * 0.14);
+        let nVisible = 0;
+
+        for (let idx = 0; idx < SMOOTH_EVENTS.length; idx++) {
+          const ev = SMOOTH_EVENTS[idx];
+          const shp = smoothPolylines[idx];
+          const relDot = smoothRelDots[idx];
+          const recStar = smoothRecStars[idx];
+          const dirArr = smoothDirArrows[idx];
+          const binOk = (smoothBinFilter === 0 || ev.b === smoothBinFilter);
+          if (!binOk) {
+            if (shp.options.fillOpacity !== undefined && shp.setRadius) shp.setStyle({fillOpacity: 0.0});
+            else shp.setStyle({opacity: 0.0});
+            relDot.setStyle({opacity: 0.0, fillOpacity: 0.0});
+            recStar.setStyle({opacity: 0.0, fillOpacity: 0.0});
+            if (dirArr) dirArr.setStyle({fillOpacity: 0.0});
+            continue;
+          }
+          nVisible++;
+          const isSel = hasCluster && smoothSelectedSet.has(ev.i);
+          const op = hasCluster ? (isSel ? 0.0 : dimAlpha) : smoothBaseAlpha;
+          if (shp.options.fillOpacity !== undefined && shp.setRadius) {
+            shp.setStyle({fillOpacity: op});
+          } else {
+            shp.setStyle({opacity: op, weight: hasCluster ? 1.1 : 1.7});
+          }
+
+          const epOp = smoothShowEndpoints ? op : 0.0;
+          relDot.setStyle({opacity: epOp * 0.75, fillOpacity: epOp * 0.85});
+          recStar.setStyle({opacity: epOp * 0.85, fillOpacity: Math.min(0.92, epOp * 1.15)});
+          if (dirArr) {
+            const arOp = smoothShowArrows ? (hasCluster ? (isSel ? 0.0 : dimAlpha) : Math.min(0.92, smoothBaseAlpha * 1.45)) : 0.0;
+            dirArr.setStyle({fillOpacity: arOp});
+          }
+
+          if (isSel) {
+            const isMoving = ev.c.length >= 2 && (ev.c[0][0] !== ev.c[ev.c.length - 1][0] || ev.c[0][1] !== ev.c[ev.c.length - 1][1]);
+            if (isMoving) {
+              L.polyline(ev.c, {color: '#0f172a', weight: 5.0, opacity: 0.68, interactive: false}).addTo(smoothHiLayer);
+              L.polyline(ev.c, {color: ev.k, weight: 3.2, opacity: 0.96})
+               .bindTooltip(ev.p, {sticky: true})
+               .bindPopup(ev.p)
+               .addTo(smoothHiLayer);
+              if (ev.a >= 1 && ev.a < ev.c.length) {
+                const pA = ev.c[ev.a - 1];
+                const pB = ev.c[ev.a];
+                const midPt = [0.5 * (pA[0] + pB[0]), 0.5 * (pA[1] + pB[1])];
+                new ArrowHeadMarker(midPt, {
+                  renderer: smoothCanvas,
+                  pPrev: pA,
+                  pNext: pB,
+                  radius: 7.5,
+                  color: '#0f172a',
+                  weight: 1.5,
+                  opacity: 0.95,
+                  fillColor: ev.k,
+                  fillOpacity: 1.0,
+                  interactive: false
+                }).addTo(smoothHiLayer);
+              }
+            }
+            L.circleMarker(ev.c[0], {radius: 4.8, color: '#064e3b', fillColor: '#22c55e', fillOpacity: 0.96, weight: 1.5})
+             .bindTooltip('<b>Mark / Release</b><br>' + ev.p)
+             .bindPopup('<b>Mark / Release</b><br>' + ev.p)
+             .addTo(smoothHiLayer);
+            L.marker(ev.c[ev.c.length - 1], {icon: hiStarIcon})
+             .bindTooltip('<b>Recapture</b><br>' + ev.p)
+             .bindPopup('<b>Recapture</b><br>' + ev.p)
+             .addTo(smoothHiLayer);
+          }
+        }
+
+        const statusEl = document.getElementById('smooth-status');
+        if (!hasCluster && statusEl) {
+          statusEl.innerHTML = 'Showing <b>' + nVisible + '</b> spline trajectories. Click anywhere on the map to highlight <i>n</i> paths (Esc to clear).';
+        }
+      }
+
+      function selectSmoothAtLatLng(latlng) {
+        if (!activeLayerCfg || activeLayerCfg.tracks !== 'smooth' || SMOOTH_EVENTS.length === 0) return;
+        const nIn = document.getElementById('smooth-n-input');
+        const parsed = parseInt(nIn.value, 10);
+        const nPick = Math.max(1, Math.min(500, Number.isFinite(parsed) ? parsed : 15));
+        smoothHighlightN = nPick;
+        nIn.value = nPick;
+
+        const cands = [];
+        for (let idx = 0; idx < SMOOTH_EVENTS.length; idx++) {
+          const ev = SMOOTH_EVENTS[idx];
+          if (smoothBinFilter !== 0 && ev.b !== smoothBinFilter) continue;
+          let dKm;
+          if (smoothClickMode === 'release') {
+            dKm = haversineKm(latlng.lat, latlng.lng, ev.c[0][0], ev.c[0][1]);
+          } else if (smoothClickMode === 'recapture') {
+            const pEnd = ev.c[ev.c.length - 1];
+            dKm = haversineKm(latlng.lat, latlng.lng, pEnd[0], pEnd[1]);
+          } else {
+            dKm = minDistToPolylineKm(latlng.lat, latlng.lng, ev.c);
+          }
+          cands.push({ev: ev, distKm: dKm});
+        }
+        if (cands.length === 0) return;
+        cands.sort(function(a, b) { return a.distKm - b.distKm; });
+        const picked = cands.slice(0, Math.min(nPick, cands.length));
+        const maxDistKm = picked[picked.length - 1].distKm;
+
+        smoothLastClick = latlng;
+        smoothSelectedSet = new Set(picked.map(function(x) { return x.ev.i; }));
+
+        smoothPinLayer.clearLayers();
+        L.circle([latlng.lat, latlng.lng], {
+          radius: Math.max(800.0, maxDistKm * 1000.0),
+          color: '#facc15',
+          weight: 1.5,
+          dashArray: '5,5',
+          fillColor: '#facc15',
+          fillOpacity: 0.06,
+          interactive: false
+        }).addTo(smoothPinLayer);
+        L.circleMarker([latlng.lat, latlng.lng], {
+          radius: 5.5,
+          color: '#ffffff',
+          weight: 2.0,
+          fillColor: '#facc15',
+          fillOpacity: 0.95,
+          interactive: false
+        }).addTo(smoothPinLayer);
+
+        let sumDisp = 0.0;
+        let sumDays = 0.0;
+        picked.forEach(function(x) {
+          sumDisp += x.ev.d;
+          sumDays += x.ev.t;
+        });
+        const meanDisp = (sumDisp / picked.length).toFixed(1);
+        const meanYr = (sumDays / picked.length / 365.25).toFixed(2);
+
+        refreshSmoothDisplay();
+        const statusEl = document.getElementById('smooth-status');
+        if (statusEl) {
+          statusEl.innerHTML = '<b>Highlighted: ' + picked.length + ' paths</b> (within ' +
+            maxDistKm.toFixed(1) + ' km)<br>Mean disp: <b>' + meanDisp +
+            ' km</b> &middot; Mean time between mark &amp; recapture: <b>' + meanYr + ' yr</b>';
+        }
+      }
+
+      function clearSmoothSelection() {
+        smoothSelectedSet = null;
+        smoothLastClick = null;
+        smoothPinLayer.clearLayers();
+        smoothHiLayer.clearLayers();
+        refreshSmoothDisplay();
+      }
+
+      map.on('click', function(ev) {
+        if (activeLayerCfg && activeLayerCfg.tracks === 'smooth') {
+          selectSmoothAtLatLng(ev.latlng);
+        }
+      });
+
+      document.getElementById('smooth-n-input').addEventListener('change', function() {
+        if (smoothLastClick !== null) selectSmoothAtLatLng(smoothLastClick);
+      });
+      document.getElementById('smooth-mode-select').addEventListener('change', function(ev) {
+        smoothClickMode = ev.target.value;
+        if (smoothLastClick !== null) selectSmoothAtLatLng(smoothLastClick);
+      });
+      document.getElementById('smooth-bin-select').addEventListener('change', function(ev) {
+        smoothBinFilter = parseInt(ev.target.value, 10) || 0;
+        if (smoothLastClick !== null) selectSmoothAtLatLng(smoothLastClick);
+        else refreshSmoothDisplay();
+      });
+      document.getElementById('smooth-alpha-slider').addEventListener('input', function(ev) {
+        smoothBaseAlpha = (parseFloat(ev.target.value) || 28.0) / 100.0;
+        document.getElementById('smooth-alpha-val').textContent = ev.target.value + '%';
+        refreshSmoothDisplay();
+      });
+      document.getElementById('smooth-show-endpoints').addEventListener('change', function(ev) {
+        smoothShowEndpoints = !!ev.target.checked;
+        refreshSmoothDisplay();
+      });
+      document.getElementById('smooth-show-arrows').addEventListener('change', function(ev) {
+        smoothShowArrows = !!ev.target.checked;
+        refreshSmoothDisplay();
+      });
+      document.getElementById('smooth-clear-btn').addEventListener('click', function() {
+        clearSmoothSelection();
+      });
+      document.addEventListener('keydown', function(ev) {
+        if (ev.key === 'Escape' && activeLayerCfg && activeLayerCfg.tracks === 'smooth') {
+          clearSmoothSelection();
+        }
+      });
+
+      // Instantiate marine cell shapes once and recolor on tab switch
+      const cellShapes = [];
+      const boundsPts = [];
+      SHARED_CELLS.forEach(function(cell) {
+        let shp;
+        if (cell.c) {
+          shp = L.polygon(cell.c, {color: '#3b82f6', fillColor: '#3b82f6', fillOpacity: 0.60, opacity: 0.35, weight: 0.5}).addTo(fieldLayer);
+          boundsPts.push(cell.c[0]);
+        } else {
+          shp = L.circleMarker(cell.pt, {radius: 4, color: '#3b82f6', fillColor: '#3b82f6', fillOpacity: 0.70, weight: 0.5}).addTo(fieldLayer);
+          boundsPts.push(cell.pt);
+        }
+        cellShapes.push(shp);
+      });
+      if (boundsPts.length > 1) {
+        map.fitBounds(boundsPts, {paddingTopLeft: [314, 24], paddingBottomRight: [24, 24]});
+      }
+
+      function applyMapLayer(cfg) {
+        activeLayerCfg = cfg;
+        document.getElementById('map-title').textContent = cfg.title;
+        const trks = TRACK_SETS[cfg.tracks] || [];
+        let sub = 'Marine units: ' + SHARED_CELLS.length;
+        if (trks.length > 0) sub += ' · Trajectories: ' + trks.length;
+        if (cfg.tracks === 'smooth' && SMOOTH_EVENTS.length > 0) {
+          sub += ' · Events: ' + SMOOTH_EVENTS.length + ' (click map to highlight n paths)';
+        }
+        if (cfg.tracks === 'roses' && MAP_ROSES.length > 0) sub += ' · 100 km Compass Roses: ' + MAP_ROSES.length + ' (blue = Rayleigh p < 0.05, red vector = mean bearing)';
+        if (cfg.hi.length > 0) sub += ' · ' + cfg.hiLabel + 's: ' + cfg.hi.length;
+        document.getElementById('map-subtitle').textContent = sub;
+
+        document.getElementById('legend-label').textContent = cfg.label;
+        if (cfg.tracks === 'smooth') {
+          document.getElementById('legend-grad-wrap').style.display = 'none';
+          document.getElementById('legend-swatches').style.display = 'flex';
+          document.getElementById('legend-symbols').style.display = 'flex';
+          document.getElementById('smooth-controls-dock').style.display = 'block';
+        } else {
+          document.getElementById('legend-grad-wrap').style.display = 'block';
+          document.getElementById('legend-swatches').style.display = 'none';
+          document.getElementById('legend-symbols').style.display = 'none';
+          document.getElementById('smooth-controls-dock').style.display = 'none';
+          document.getElementById('legend-bar').style.background = 'linear-gradient(to right, ' + cfg.grad + ')';
+          document.getElementById('legend-min').textContent = cfg.vmin;
+          document.getElementById('legend-mid').textContent = cfg.vmid;
+          document.getElementById('legend-max').textContent = cfg.vmax;
+        }
+
+        for (let i = 0; i < cellShapes.length; i++) {
+          const col = cfg.k[i] || '#3b82f6';
+          const fop = (cfg.o && cfg.o[i] !== undefined) ? cfg.o[i] : 0.60;
+          const sop = fop < 0.12 ? 0.12 : 0.42;
+          const val = cfg.v[i];
+          cellShapes[i].setStyle({color: col, fillColor: col, fillOpacity: fop, opacity: sop});
+          cellShapes[i].unbindTooltip();
+          if (cfg.tracks !== 'smooth') {
+            cellShapes[i].bindTooltip('Unit ' + SHARED_CELLS[i].u + ' · ' + cfg.label + ': ' + val);
+          }
+        }
+
+        trackLayer.clearLayers();
+        fluxLayer.clearLayers();
+        roseLayer.clearLayers();
+        endpointLayer.clearLayers();
+        smoothBgLayer.clearLayers();
+        smoothHiLayer.clearLayers();
+        smoothPinLayer.clearLayers();
+        if (cfg.tracks === 'smooth') {
+          for (let i = 0; i < cellShapes.length; i++) {
+            cellShapes[i].setStyle({fillOpacity: 0.0, opacity: 0.0});
+          }
+          ensureSmoothPolylines();
+          for (let k = 0; k < SMOOTH_EVENTS.length; k++) {
+            smoothBgLayer.addLayer(smoothPolylines[k]);
+            smoothBgLayer.addLayer(smoothRelDots[k]);
+            smoothBgLayer.addLayer(smoothRecStars[k]);
+            if (smoothDirArrows[k]) smoothBgLayer.addLayer(smoothDirArrows[k]);
+          }
+          if (smoothLastClick !== null) {
+            selectSmoothAtLatLng(smoothLastClick);
+          } else {
+            refreshSmoothDisplay();
+          }
+        } else if (cfg.tracks === 'flux') {
+          FLUX_ARROWS.forEach(function(f) {
+            L.polyline([f.a, f.b], {color: '#38bdf8', weight: f.w, opacity: f.o})
+             .bindTooltip(f.p).addTo(fluxLayer);
+            const tipLat = f.a[0] + 0.82 * (f.b[0] - f.a[0]);
+            const tipLon = f.a[1] + 0.82 * (f.b[1] - f.a[1]);
+            L.circleMarker([tipLat, tipLon], {
+              radius: Math.max(2.2, f.w * 0.85), color: '#0284c7',
+              fillColor: '#e0f2fe', fillOpacity: 0.95, weight: 1
+            }).bindTooltip(f.p).addTo(fluxLayer);
+          });
+        } else if (cfg.tracks === 'roses') {
+          for (let i = 0; i < cellShapes.length; i++) {
+            cellShapes[i].setStyle({fillOpacity: 0.25, opacity: 0.18});
+          }
+          MAP_ROSES.forEach(function(r) {
+            const icon = L.divIcon({
+              html: r.svg,
+              className: 'rose-marker',
+              iconSize: [76, 76],
+              iconAnchor: [38, 38]
+            });
+            L.marker([r.lat, r.lon], {icon: icon})
+             .bindTooltip(r.p, {direction: 'top', offset: [0, -34]})
+             .bindPopup(r.p)
+             .addTo(roseLayer);
+          });
+        }
+        trks.forEach(function(t) {
+          L.polyline(t.c, {color: t.k, weight: 2.2, opacity: 0.88}).bindPopup(t.p).addTo(trackLayer);
+          L.circleMarker(t.c[0], {radius: 3.6, color: '#064e3b', fillColor: '#22c55e', fillOpacity: 0.94, weight: 1.1})
+           .bindPopup('<b>Mark / Release</b><br>' + t.p).addTo(endpointLayer);
+          L.marker(t.c[t.c.length - 1], {icon: hiStarIcon})
+           .bindPopup('<b>Recapture</b><br>' + t.p).addTo(endpointLayer);
+        });
+
+        highlightLayer.clearLayers();
+        cfg.hi.forEach(function(idx) {
+          const cell = SHARED_CELLS[idx];
+          if (!cell) return;
+          L.circleMarker(cell.pt, {radius: 4.5, color: '#eab308', fillColor: '#fde047', fillOpacity: 0.85, weight: 1.5})
+           .bindTooltip(cfg.hiLabel + ' · Unit ' + cell.u + ' (' + cfg.v[idx] + ')').addTo(highlightLayer);
+        });
+      }
+
+      // Build map tab buttons dynamically from MAP_LAYERS
+      const btnWrap = document.getElementById('map-tab-buttons');
+      MAP_LAYERS.forEach(function(cfg, idx) {
+        const b = document.createElement('button');
+        b.className = 'tab-btn' + (idx === 0 ? ' active' : '');
+        b.textContent = cfg.tab;
+        b.dataset.kind = 'map';
+        b.dataset.layerIdx = idx;
+        btnWrap.appendChild(b);
+      });
+
+      document.getElementById('tab-bar').addEventListener('click', function(ev) {
+        const btn = ev.target.closest('.tab-btn');
+        if (!btn) return;
+        document.querySelectorAll('.tab-btn').forEach(function(el) { el.classList.remove('active'); });
+        btn.classList.add('active');
+
+        const mapPane = document.getElementById('map-pane');
+        document.querySelectorAll('.report-pane').forEach(function(el) { el.style.display = 'none'; });
+
+        if (btn.dataset.kind === 'map') {
+          mapPane.style.display = 'block';
+          map.invalidateSize();
+          applyMapLayer(MAP_LAYERS[parseInt(btn.dataset.layerIdx, 10)]);
+        } else {
+          mapPane.style.display = 'none';
+          const target = document.getElementById(btn.dataset.target);
+          if (target) target.style.display = 'block';
+        }
+      });
+
+      if (MAP_LAYERS.length > 0) {
+        applyMapLayer(MAP_LAYERS[0]);
+      }
+      document.getElementById('data-loader-overlay').classList.add('hidden');
+    }
+
+    async function decodeZlibBuffer(arrayBuf, statusEl) {
+      if (typeof DecompressionStream === 'undefined') {
+        throw new Error('Browser does not support DecompressionStream.');
+      }
+      const stream = new Blob([arrayBuf]).stream().pipeThrough(new DecompressionStream('deflate'));
+      const text = await new Response(stream).text();
+      if (statusEl) {
+        statusEl.textContent = 'Parsing JSON (' + (text.length / 1e6).toFixed(1) + ' MB)...';
+        await new Promise(function(r) { setTimeout(r, 0); });
+      }
+      return JSON.parse(text);
+    }
+
+    async function loadSidecarAndBoot() {
+      const statusEl = document.getElementById('loader-status');
+      const pickerEl = document.getElementById('loader-picker');
+      const fileInput = document.getElementById('sidecar-file-input');
+
+      fileInput.addEventListener('change', async function(ev) {
+        const file = ev.target.files && ev.target.files[0];
+        if (!file) return;
+        statusEl.textContent = 'Reading ' + file.name + ' (' + (file.size / 1e6).toFixed(2) + ' MB)...';
+        try {
+          const buf = await file.arrayBuffer();
+          statusEl.textContent = 'Decompressing ' + file.name + '...';
+          await new Promise(function(r) { setTimeout(r, 0); });
+          const payload = await decodeZlibBuffer(buf, statusEl);
+          bootDashboard(payload);
+        } catch (err) {
+          statusEl.textContent = 'Failed to load ' + file.name + ': ' + err.message;
+          pickerEl.style.display = 'block';
+        }
+      });
+
+      if (window.location.protocol === 'file:') {
+        statusEl.textContent =
+          'Local file:// mode: browsers block automatic fetch of ' + SIDECAR_FILE +
+          '. Select ' + SIDECAR_FILE + ' below, or serve over HTTP/HTTPS (e.g. GitHub Pages) for auto-loading.';
+        pickerEl.style.display = 'block';
+        return;
+      }
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(function() { controller.abort(); }, 15000);
+      try {
+        statusEl.textContent = 'Fetching ' + SIDECAR_FILE + '...';
+        const resp = await fetch('./' + SIDECAR_FILE, {signal: controller.signal});
+        clearTimeout(timeoutId);
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const buf = await resp.arrayBuffer();
+        statusEl.textContent = 'Decompressing ' + SIDECAR_FILE + ' (' + (buf.byteLength / 1e6).toFixed(2) + ' MB)...';
+        await new Promise(function(r) { setTimeout(r, 0); });
+        const payload = await decodeZlibBuffer(buf, statusEl);
+        bootDashboard(payload);
+      } catch (err) {
+        clearTimeout(timeoutId);
+        const msg = err.name === 'AbortError' ? 'request timed out after 15 s' : err.message;
+        statusEl.textContent =
+          'Automatic fetch of ' + SIDECAR_FILE + ' failed (' + msg + '). Select ' + SIDECAR_FILE + ' directly below.';
+        pickerEl.style.display = 'block';
+      }
+    }
+
+    loadSidecarAndBoot();
+    </script></body></html>
+    """
+    write(filepath, html)
+    return String(filepath)
+end
+
+function _enrich_obs_traits_from_tagging!(loaded, params)::Nothing
+    (loaded === nothing || !hasproperty(loaded, :obs_df) || !(loaded.obs_df isa DataFrame)) && return nothing
+    obs_df = loaded.obs_df
+    nrow(obs_df) == 0 && return nothing
+    has_cw = hasproperty(obs_df, :cw) &&
+             any(v -> !ismissing(v) && v isa Real && isfinite(Float64(v)), obs_df.cw)
+    has_cw && return nothing
+
+    tfile = hasproperty(params, :tagging_file) ? params.tagging_file : nothing
+    (tfile === nothing || !isfile(tfile)) && return nothing
+
+    try
+        ext = lowercase(splitext(tfile)[2])
+        ext == ".jld2" || return nothing
+        raw = JLD2.load(tfile)
+        tdf = raw isa AbstractDict ? (haskey(raw, "tagging") ? raw["tagging"] : first(values(raw))) : raw
+        tdf isa DataFrame || return nothing
+
+        cw_map    = Dict{String, Float64}()
+        chela_map = Dict{String, Float64}()
+        wgt_map   = Dict{String, Float64}()
+        z_map     = Dict{String, Float64}()
+        cc_map    = Dict{String, String}()
+        sex_map   = Dict{String, String}()
+        mat_map   = Dict{String, String}()
+
+        for r in eachrow(tdf)
+            ismissing(r.tagid) && continue
+            tid = string(r.tagid)
+            if hasproperty(r, :cw) && !ismissing(r.cw) && isfinite(Float64(r.cw))
+                haskey(cw_map, tid) || (cw_map[tid] = Float64(r.cw))
+            end
+            if hasproperty(r, :chela) && !ismissing(r.chela) && isfinite(Float64(r.chela))
+                haskey(chela_map, tid) || (chela_map[tid] = Float64(r.chela))
+            end
+            if hasproperty(r, :wgt) && !ismissing(r.wgt) && isfinite(Float64(r.wgt))
+                haskey(wgt_map, tid) || (wgt_map[tid] = Float64(r.wgt))
+            end
+            if hasproperty(r, :z) && !ismissing(r.z) && isfinite(Float64(r.z))
+                haskey(z_map, tid) || (z_map[tid] = Float64(r.z))
+            end
+            if hasproperty(r, :cc) && !ismissing(r.cc)
+                c = strip(string(r.cc))
+                (!isempty(c) && !(lowercase(c) in ("missing", "none")) && !haskey(cc_map, tid)) && (cc_map[tid] = c)
+            end
+            if hasproperty(r, :sex) && !ismissing(r.sex)
+                s = strip(string(r.sex))
+                (!isempty(s) && lowercase(s) != "missing" && !haskey(sex_map, tid)) && (sex_map[tid] = s)
+            end
+            if hasproperty(r, :mat) && !ismissing(r.mat)
+                m = strip(string(r.mat))
+                (!isempty(m) && lowercase(m) != "missing" && !haskey(mat_map, tid)) && (mat_map[tid] = m)
+            end
+        end
+
+        tids = string.(obs_df.tagid)
+        obs_df[!, :cw]    = Union{Float64, Missing}[get(cw_map, t, missing) for t in tids]
+        obs_df[!, :chela] = Union{Float64, Missing}[get(chela_map, t, missing) for t in tids]
+        obs_df[!, :wgt]   = Union{Float64, Missing}[get(wgt_map, t, missing) for t in tids]
+        obs_df[!, :z]     = Union{Float64, Missing}[get(z_map, t, missing) for t in tids]
+        obs_df[!, :cc]    = String[get(cc_map, t, "unknown") for t in tids]
+        if hasproperty(obs_df, :sex)
+            obs_df[!, :sex] = String[get(sex_map, t, "unknown") for t in tids]
+        end
+        if hasproperty(obs_df, :mat)
+            obs_df[!, :mat] = String[get(mat_map, t, "unknown") for t in tids]
+        end
+    catch
+    end
+    return nothing
+end
+
+function _ensure_region_map(loaded, params)
+    (loaded === nothing || !hasproperty(loaded, :mesh)) && return loaded
+    rfiles = hasproperty(params, :region_polygon_files) ? params.region_polygon_files : String[]
+    isempty(rfiles) && return loaded
+    has_rmap = hasproperty(loaded, :region_map) && loaded.region_map !== nothing &&
+               length(loaded.region_map) == loaded.n_spatial && maximum(loaded.region_map; init = 0) >= 2
+    has_rmap && return loaded
+
+    cents = hasproperty(loaded.mesh, :centroids_lonlat) ? loaded.mesh.centroids_lonlat : nothing
+    cents === nothing && return loaded
+    labels = (hasproperty(params, :region_labels) && !isempty(params.region_labels)) ?
+        String.(params.region_labels) : ["Region $i" for i in eachindex(rfiles)]
+    polys = load_region_polygons(rfiles, labels)
+    rmap = region_map_from_polygons(cents, polys)
+    maximum(rmap; init = 0) >= 1 || return loaded
+    return merge(loaded, (region_map = rmap, region_labels = labels))
+end
+
+function _step_years(params, loaded = nothing)::Float64
+    if loaded !== nothing && hasproperty(loaded, :data) && loaded.data !== nothing &&
+       hasproperty(loaded.data, :step_years) && isfinite(loaded.data.step_years) &&
+       loaded.data.step_years > 0
+        return Float64(loaded.data.step_years)
+    elseif loaded !== nothing && hasproperty(loaded, :obs_df) &&
+           loaded.obs_df isa DataFrame && hasproperty(loaded.obs_df, :k) &&
+           nrow(loaded.obs_df) > 0 && maximum(loaded.obs_df.k) > 120
+        # Daily mark-recapture step count (k in days)
+        return 1.0 / 365.25
+    elseif hasproperty(params, :fpt_step_years) && params.fpt_step_years !== nothing &&
+           isfinite(params.fpt_step_years) && params.fpt_step_years > 0
+        return Float64(params.fpt_step_years)
+    elseif hasproperty(params, :time_interval)
+        ti = params.time_interval
+        return ti == :weekly ? (1.0 / 52.0) : (ti == :daily ? (1.0 / 365.25) : (1.0 / 12.0))
+    end
+    return 1.0 / 12.0
+end
+
 function export_dashboards(
     loaded, kernels, path_results, diagnostics, params,
     validation = nothing,
     agent_trajectories = nothing,
     agent_space_use = nothing
 )::Union{NamedTuple, Nothing}
-    # Dashboards (Leaflet/HTML) have been moved to notebooks/TethysPathNotes.jl
-    # (IMPLEMENTATION_PLAN.md Phase 6). This is a no-op shim so existing call
-    # sites do not break; it renders nothing and returns nothing.
-    return nothing
-end
-function _export_ppc_html(filepath::String, ppc::NamedTuple;
-                          species::String = "generic")::String
-    mkpath(dirname(filepath))
+    out_dir = _resolve_output_dir(params.output_dir)
+    mkpath(out_dir)
+    verbose = params.verbose
+    verbose && println("\n[Phase 6] Exporting path analyses and consolidated dashboard to: $out_dir")
 
-    # Build SVG trace for a vector of per-draw values.
-    function _trace_svg(
-        vals::Vector{Float64},
-        label::String,
-        color::String;
-        width::Int = 360, height::Int = 160
-    )::String
-        N = length(vals)
-        N < 2 && return "<p>Insufficient draws</p>"
-        vmin, vmax = minimum(vals), maximum(vals)
-        abs(vmax - vmin) < 1e-14 && (vmax = vmin + 1.0)
-        pad_l, pad_r, pad_t, pad_b = 48, 12, 18, 28
-        pw = width  - pad_l - pad_r
-        ph = height - pad_t - pad_b
-        y_ax = height - pad_b
+    _enrich_obs_traits_from_tagging!(loaded, params)
+    step_yr = _step_years(params, loaded)
 
-        io = IOBuffer()
-        write(io, "<svg width=\"$width\" height=\"$height\" " *
-                  "xmlns=\"http://www.w3.org/2000/svg\">")
-        write(io, "<line x1=\"$pad_l\" y1=\"$y_ax\" x2=\"$(width - pad_r)\" " *
-                  "y2=\"$y_ax\" stroke=\"#475569\" stroke-width=\"1\"/>")
-        write(io, "<line x1=\"$pad_l\" y1=\"$pad_t\" x2=\"$pad_l\" " *
-                  "y2=\"$y_ax\" stroke=\"#475569\" stroke-width=\"1\"/>")
-        pts = String[]
-        for i in 1:N
-            px = pad_l + ((i - 1) / (N - 1)) * pw
-            py = y_ax  - ((vals[i] - vmin) / (vmax - vmin)) * ph
-            push!(pts, (i == 1 ? "M" : "L") *
-                       " $(round(px; digits=1)) $(round(py; digits=1))")
-        end
-        write(io, "<path d=\"$(join(pts, " "))\" fill=\"none\" stroke=\"$color\" " *
-                  "stroke-width=\"1.8\"/>")
-        mid_x = pad_l + pw ÷ 2
-        write(io, "<text x=\"$mid_x\" y=\"$(height - 6)\" " *
-                  "text-anchor=\"middle\" fill=\"#94a3b8\" font-size=\"11\" " *
-                  "font-family=\"Outfit, sans-serif\">$label</text>")
-        # y-axis tick labels
-        for (frac, lab) in ((0.0, round(vmin; digits = 4)),
-                            (1.0, round(vmax; digits = 4)))
-            py_t = round(Int, y_ax - frac * ph)
-            write(io, "<text x=\"$(pad_l - 4)\" y=\"$py_t\" " *
-                      "text-anchor=\"end\" fill=\"#64748b\" font-size=\"9\" " *
-                      "font-family=\"JetBrains Mono, monospace\">$lab</text>")
-        end
-        write(io, "</svg>")
-        String(take!(io))
+    paths_rich = try
+        _build_paths_rich(path_results, loaded; step_years = step_yr)
+    catch e
+        _record_panel_skip("Build paths_rich", e)
+        NamedTuple[]
     end
 
-    # Observed vs mean predicted distribution bar chart.
-    function _dist_svg(
-        obs::Vector{Float64},
-        pred::Vector{Float64};
-        width::Int = 720, height::Int = 160
-    )::String
-        N = length(obs)
-        N < 1 && return "<p>No distribution</p>"
-        active_units = findall(i -> obs[i] > 0.0 || (i <= length(pred) && pred[i] > 1e-6), 1:N)
-        if isempty(active_units)
-            active_units = collect(1:min(N, 60))
+    mov_stats = nothing
+    phenology = nothing
+    trait_models = nothing
+    written_files = String[]
+
+    if !isempty(paths_rich)
+        try
+            mov_stats = compute_movement_statistics(paths_rich, path_results, loaded; params = params)
+            csv_path = joinpath(out_dir, "movement_path_metrics.csv")
+            export_movement_summary_csv(csv_path, paths_rich, mov_stats, loaded.obs_df)
+            push!(written_files, csv_path)
+            verbose && println("  Path metrics CSV: $csv_path")
+        catch e
+            _record_panel_skip("Path metrics CSV", e)
         end
-        sort!(active_units, by = u -> (obs[u], u <= length(pred) ? pred[u] : 0.0), rev = true)
-        n_show = min(length(active_units), 60)
-        u_sel  = active_units[1:n_show]
-        obs_s  = obs[u_sel]
-        pred_s = [u <= length(pred) ? pred[u] : 0.0 for u in u_sel]
-        vmax   = max(maximum(obs_s), maximum(pred_s), 1e-14)
-        pad_l, pad_r, pad_t, pad_b = 8, 8, 14, 22
-        bw = max(1, (width - pad_l - pad_r) ÷ n_show)
-        ph = height - pad_t - pad_b
-        y_ax = height - pad_b
-        io = IOBuffer()
-        write(io, "<svg width=\"$width\" height=\"$height\" " *
-                  "xmlns=\"http://www.w3.org/2000/svg\">")
-        for i in 1:n_show
-            x0  = pad_l + (i - 1) * bw
-            h_o = round(Int, (obs_s[i]  / vmax) * ph)
-            h_p = round(Int, (pred_s[i] / vmax) * ph)
-            write(io, "<rect x=\"$x0\" y=\"$(y_ax - h_o)\" " *
-                      "width=\"$(max(1, bw - 1))\" height=\"$h_o\" " *
-                      "fill=\"#38bdf8\" opacity=\"0.75\"/>")
-            write(io, "<rect x=\"$x0\" y=\"$(y_ax - h_p)\" " *
-                      "width=\"$(max(1, bw - 1))\" height=\"$h_p\" " *
-                      "fill=\"#f43f5e\" opacity=\"0.45\"/>")
+        try
+            if mov_stats !== nothing
+                phenology = analyze_seasonal_movement_phenology(loaded.obs_df, mov_stats, loaded)
+            end
+        catch e
+            _record_panel_skip("Seasonal phenology", e)
         end
-        mid_x = width ÷ 2
-        write(io, "<text x=\"$mid_x\" y=\"$(height - 6)\" " *
-                  "text-anchor=\"middle\" fill=\"#94a3b8\" font-size=\"11\" " *
-                  "font-family=\"Outfit, sans-serif\">" *
-                  "Active Spatial Units ($n_show ranked by density) \u2014 " *
-                  "<tspan fill=\"#38bdf8\">\u25a0 Observed</tspan> " *
-                  "<tspan fill=\"#f43f5e\">\u25a0 Predicted</tspan></text>")
-        write(io, "</svg>")
-        String(take!(io))
+        try
+            if mov_stats !== nothing
+                trait_models = model_trait_movement_associations(loaded.obs_df, mov_stats, loaded)
+            end
+        catch e
+            _record_panel_skip("Trait-movement associations", e)
+        end
     end
 
+    if agent_space_use !== nothing
+        try
+            su_csv = joinpath(out_dir, "movement_agent_space_use.csv")
+            su_df = agent_space_use isa DataFrame ? agent_space_use : DataFrame(agent_space_use)
+            CSV.write(su_csv, su_df)
+            push!(written_files, su_csv)
+            verbose && println("  Agent space-use CSV: $su_csv")
+        catch e
+            _record_panel_skip("Agent space-use CSV", e)
+        end
+    end
 
-    brier  = Float64.(ppc.brier_scores)
-    kl     = Float64.(ppc.kl_divergences)
-    obs_d  = Float64.(ppc.observed_dist)
-    pred_d = hasproperty(ppc, :predicted_dist_mean) ?
-             Float64.(ppc.predicted_dist_mean) : Float64[]
+    if params.render_html
+        try
+            ag_paths = NamedTuple[]
+            n_spatial = loaded.n_spatial
+            hsi_field = hasproperty(loaded, :hsi_vec) && length(loaded.hsi_vec) >= n_spatial ?
+                loaded.hsi_vec : fill(0.5, n_spatial)
+            if agent_trajectories isa DataFrame && hasproperty(agent_trajectories, :tagid) &&
+               hasproperty(agent_trajectories, :mesh_unit) &&
+               hasproperty(loaded.mesh, :centroids_lonlat)
+                cents_ll = loaded.mesh.centroids_lonlat
+                for (ai, sub) in enumerate(groupby(agent_trajectories, :tagid))
+                    ai > 80 && break
+                    nodes = Int[Int(u) for u in sub.mesh_unit if 1 <= Int(u) <= length(cents_ll)]
+                    length(nodes) < 2 && continue
+                    coords = Tuple{Float64, Float64}[(Float64(cents_ll[u][1]), Float64(cents_ll[u][2])) for u in nodes]
+                    tot = sum(haversine_distance(coords[k-1][1], coords[k-1][2], coords[k][1], coords[k][2]) / 1000.0 for k in 2:length(coords))
+                    disp = haversine_distance(coords[1][1], coords[1][2], coords[end][1], coords[end][2]) / 1000.0
+                    push!(ag_paths, (
+                        tagid = string(first(sub.tagid)),
+                        coords = coords,
+                        total_dist_km = tot,
+                        displacement_km = disp,
+                        speed_km_per_year = disp / max(length(nodes) * step_yr, 1e-4),
+                        mean_hsi = mean(hsi_field[u] for u in nodes)
+                    ))
+                end
+            end
 
-    sm = ppc.summary
-    brier_m  = round(sm.brier_mean;     digits = 6)
-    brier_lo = round(sm.brier_lower_ci; digits = 6)
-    brier_hi = round(sm.brier_upper_ci; digits = 6)
-    kl_m     = round(sm.kl_mean;        digits = 6)
-    kl_lo    = round(sm.kl_lower_ci;    digits = 6)
-    kl_hi    = round(sm.kl_upper_ci;    digits = 6)
-    n_obs    = sm.n_observations
-    n_draws  = sm.n_draws
+            bathy_mig = try
+                analyze_bathymetric_migration(loaded.obs_df, loaded)
+            catch e
+                _record_panel_skip("Bathymetric migration", e)
+                nothing
+            end
+            disp_diag = try
+                evaluate_dispersal_scaling_and_null(loaded, kernels; step_years = step_yr)
+            catch e
+                _record_panel_skip("Dispersal scaling & null model", e)
+                nothing
+            end
+            bio_strat = try
+                analyze_biological_state_stratification(loaded.obs_df, loaded; step_years = step_yr)
+            catch e
+                _record_panel_skip("Biological-state stratification", e)
+                nothing
+            end
+            spatial_roses = try
+                sr = compute_spatial_bearing_roses(loaded.obs_df, loaded; grid_km = 100.0, min_events = 8)
+                r_csv = export_spatial_bearing_roses_csv(sr, out_dir)
+                push!(written_files, r_csv)
+                sr
+            catch e
+                _record_panel_skip("Spatial 100 km bearing roses", e)
+                nothing
+            end
+            taxis_proj = try
+                tp = analyze_gradient_taxis_projections(loaded.obs_df, loaded)
+                t_csv = export_gradient_taxis_csv(tp, out_dir)
+                push!(written_files, t_csv)
+                tp
+            catch e
+                _record_panel_skip("Gradient taxis projections", e)
+                nothing
+            end
+            if hasproperty(kernels, :datasource_summary) && kernels.datasource_summary !== nothing
+                try
+                    ds_df = kernels.datasource_summary isa DataFrame ?
+                        kernels.datasource_summary : DataFrame(kernels.datasource_summary)
+                    if nrow(ds_df) > 0
+                        ds_csv = joinpath(out_dir, "acoustic_vs_trap_inference.csv")
+                        CSV.write(ds_csv, ds_df)
+                        push!(written_files, ds_csv)
+                    end
+                catch e
+                    _record_panel_skip("Acoustic vs trap CSV", e)
+                end
+            end
 
-    svg_brier = _trace_svg(brier, "Brier Score (draw)",    "#38bdf8")
-    svg_kl    = _trace_svg(kl,    "KL Divergence (draw)",  "#f43f5e")
-    svg_dist  = _dist_svg(obs_d, pred_d)
+            smooth_events = try
+                reconstruct_all_event_trajectories(
+                    loaded, kernels;
+                    step_years   = step_yr,
+                    seed         = params.seed,
+                    resolution   = params.land_mask_resolution,
+                    grid_minutes = params.land_mask_grid_minutes
+                )
+            catch e
+                _record_panel_skip("Smoothed all-event trajectories", e)
+                NamedTuple[]
+            end
 
-    html = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<title>$species — Posterior Predictive Check</title>
-<style>
-  :root {
-    --bg:          #0f172a;
-    --surface:     #1e293b;
-    --border:      #334155;
-    --text:        #f1f5f9;
-    --muted:       #94a3b8;
-    --accent:      #38bdf8;
-    --font-main:   'Outfit', system-ui, sans-serif;
-    --font-mono:   'JetBrains Mono', monospace;
-  }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    background: var(--bg); color: var(--text);
-    font-family: var(--font-main);
-    padding: 28px 36px;
-  }
-  h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: 6px; }
-  .subtitle { color: var(--muted); font-size: 0.9rem; margin-bottom: 24px; }
-  .kpi-row {
-    display: flex; gap: 18px; flex-wrap: wrap; margin-bottom: 28px;
-  }
-  .kpi {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: 10px; padding: 14px 20px; min-width: 180px;
-  }
-  .kpi-label { font-size: 0.75rem; color: var(--muted); margin-bottom: 4px; }
-  .kpi-value {
-    font-size: 1.25rem; font-weight: 700;
-    font-family: var(--font-mono); color: var(--accent);
-  }
-  .kpi-ci {
-    font-size: 0.72rem; color: var(--muted);
-    font-family: var(--font-mono); margin-top: 2px;
-  }
-  .section-title {
-    font-size: 0.85rem; font-weight: 600; text-transform: uppercase;
-    letter-spacing: 0.07em; color: var(--muted); margin: 22px 0 10px;
-  }
-  .traces { display: flex; gap: 20px; flex-wrap: wrap; }
-  .panel {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: 10px; padding: 14px 16px;
-  }
-  .dist-panel {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: 10px; padding: 14px 16px; margin-top: 20px;
-  }
-</style>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700&family=JetBrains+Mono&display=swap" rel="stylesheet">
-</head>
-<body>
-<h1>$species — Posterior Predictive Check</h1>
-<div class="subtitle">$n_obs observations · $n_draws MCMC draws evaluated</div>
+            dash_html = joinpath(out_dir, "movement_dashboard.html")
+            dash_sidecar = joinpath(out_dir, "movement_dashboard.data.zz")
+            _export_consolidated_dashboard_html(
+                dash_html, loaded, kernels, path_results, diagnostics, params,
+                validation, paths_rich, ag_paths, agent_space_use,
+                mov_stats, phenology, trait_models;
+                bathy_mig = bathy_mig, disp_diag = disp_diag, bio_strat = bio_strat,
+                spatial_roses = spatial_roses, taxis_proj = taxis_proj,
+                smooth_events = smooth_events
+            )
+            push!(written_files, dash_html)
+            isfile(dash_sidecar) && push!(written_files, dash_sidecar)
+            if verbose
+                cmp_mb = isfile(dash_sidecar) ? round(filesize(dash_sidecar) / 1e6; digits = 2) : 0.0
+                println("  Consolidated multi-tab dashboard: $dash_html (sidecar: $dash_sidecar, $(cmp_mb) MB compressed)")
+            end
+        catch e
+            _record_panel_skip("Consolidated HTML dashboard", e)
+            verbose && println("  (Dashboard export skipped: $(_error_note(e)))")
+        end
+    end
 
-<div class="kpi-row">
-  <div class="kpi">
-    <div class="kpi-label">Brier Score (MSE)</div>
-    <div class="kpi-value">$brier_m</div>
-    <div class="kpi-ci">95% CI [$brier_lo, $brier_hi]</div>
-  </div>
-  <div class="kpi">
-    <div class="kpi-label">KL Divergence</div>
-    <div class="kpi-value">$kl_m</div>
-    <div class="kpi-ci">95% CI [$kl_lo, $kl_hi]</div>
-  </div>
-</div>
-
-<div class="section-title">Per-Draw Traces</div>
-<div class="traces">
-  <div class="panel">$svg_brier</div>
-  <div class="panel">$svg_kl</div>
-</div>
-
-<div class="section-title">Recapture Probability Distribution</div>
-<div class="dist-panel">$svg_dist</div>
-</body></html>
-"""
-    write(filepath, html)
-    return filepath
+    return (
+        movement_stats = mov_stats,
+        phenology = phenology,
+        trait_models = trait_models,
+        files = written_files
+    )
 end
 
 
@@ -3094,10 +5564,8 @@ end
         Union{NamedTuple, Nothing}
 
 Executes validation post-processing analyses for mark-recapture telemetry:
-1. Path credible intervals and node visitation distributions
-   (`path_credible_intervals`)
-2. Regional stock connectivity matrix and credible intervals
-   (`compute_stock_connectivity_matrix`)
+1. Spatial corridor entropy and canalization (`compute_corridor_canalization`)
+2. 1-year HSI-weighted regional stock connectivity (`compute_stock_connectivity_matrix`)
 3. Posterior predictive checks (`posterior_predictive_check`)
 4. Optional full Bayesian ensemble trajectory and corridor propagation
    (`reconstruct_paths_bayesian_ensemble`)
@@ -3126,7 +5594,7 @@ function execute_validation_analyses(
     (wants_validation || wants_ensemble || wants_conn || wants_recap) ||
         return nothing
     verbose = params.verbose
-    out_dir = params.output_dir
+    out_dir = _resolve_output_dir(params.output_dir)
     mkpath(out_dir)
 
     pa = wants_validation ?
@@ -3184,7 +5652,7 @@ function execute_validation_analyses(
     # so each field is taken from it only when the validation analyses
     # actually ran.
     return (
-        path_uncertainty         = isnothing(pa) ? nothing : pa.path_uncertainty,
+        corridor_canalization    = isnothing(pa) ? nothing : pa.corridor_canalization,
         connectivity_matrix      = isnothing(pa) ? nothing : pa.connectivity_matrix,
         connectivity_uncertainty = isnothing(pa) ? nothing : pa.connectivity_uncertainty,
         posterior_predictive     = isnothing(pa) ? nothing : pa.posterior_predictive,
@@ -3233,31 +5701,208 @@ With `params.tessellation_only` the run stops after the mesh: the tessellation m
 is written and opened, and the return has `nothing` for every fitted quantity plus
 `tessellation_only = true` and `tessellation_path`.
 """
+_sanitize_zarr_key(k) = replace(strip(string(k)), r"[^A-Za-z0-9._-]+" => "_")
+
+function _zarr_checkpoint_sanitize(x)
+    if x === nothing || x isa Bool || x isa Number || x isa AbstractString || x isa Symbol
+        return x
+    elseif x isa Dates.AbstractTime
+        return string(x)
+    elseif x isa Function || x isa Type || x isa Module
+        return string(x)
+    elseif x isa Turing.DynamicPPL.Model
+        return "DynamicPPL.Model($(nameof(x.f)))"
+    elseif x isa SparseMatrixCSC
+        return Matrix(x)
+    elseif x isa AbstractRange
+        return collect(x)
+    elseif x isa AbstractArray{<:Real} || x isa AbstractArray{Bool} ||
+           x isa AbstractArray{Symbol} || x isa AbstractArray{<:AbstractString}
+        return x
+    elseif x isa AbstractVector && !isempty(x) &&
+           all(v -> v isa Tuple && all(e -> e isa Real, v), x)
+        k = length(first(x))
+        mat = Matrix{Float64}(undef, length(x), k)
+        for (i, pt) in enumerate(x)
+            for j in 1:k
+                mat[i, j] = Float64(pt[j])
+            end
+        end
+        return mat
+    elseif x isa AbstractVector && !isempty(x) &&
+           all(v -> v isa AbstractVector && all(e -> e isa Tuple && length(e) >= 2 &&
+                                                e[1] isa Real && e[2] isa Real, v), x)
+        indptr = Vector{Int64}(undef, length(x) + 1)
+        indptr[1] = 1
+        xs = Float64[]
+        ys = Float64[]
+        for (i, ring) in enumerate(x)
+            for pt in ring
+                push!(xs, Float64(pt[1]))
+                push!(ys, Float64(pt[2]))
+            end
+            indptr[i + 1] = length(xs) + 1
+        end
+        return (indptr = indptr, x = xs, y = ys)
+    elseif x isa AbstractVector && !isempty(x) &&
+           all(v -> v isa AbstractVector && eltype(v) <: Real, x)
+        return x
+    elseif x isa AbstractVector
+        return Dict{String, Any}(string(i) => _zarr_checkpoint_sanitize(v) for (i, v) in enumerate(x))
+    elseif x isa Tuple
+        return Dict{String, Any}(string(i) => _zarr_checkpoint_sanitize(v) for (i, v) in enumerate(x))
+    elseif x isa AbstractSet
+        return [_zarr_checkpoint_sanitize(v) for v in x]
+    elseif x isa DataFrame
+        out = DataFrame()
+        for col in names(x)
+            v = x[!, col]
+            S = nonmissingtype(eltype(v))
+            if v isa AbstractArray{Missing} || S <: Union{Real, Bool, AbstractString, Symbol}
+                out[!, col] = v
+            else
+                out[!, col] = [ismissing(e) ? missing : string(e) for e in v]
+            end
+        end
+        return out
+    elseif x isa AbstractDict
+        return Dict{String, Any}(
+            _sanitize_zarr_key(k) => _zarr_checkpoint_sanitize(v) for (k, v) in pairs(x)
+        )
+    elseif x isa NamedTuple
+        return NamedTuple{keys(x)}(map(_zarr_checkpoint_sanitize, values(x)))
+    elseif hasmethod(keys, Tuple{typeof(x)}) && hasmethod(Array, Tuple{typeof(x)}) &&
+           occursin("Chain", string(typeof(x)))
+        # MCMCChains / FlexiChains: extract parameter draws as a Dict{String, Vector{Float64}}
+        d = Dict{String, Any}()
+        for k in keys(x)
+            try
+                d[_sanitize_zarr_key(k)] = vec(Float64.(Array(x[k])))
+            catch
+            end
+        end
+        return d
+    elseif fieldcount(typeof(x)) > 0
+        fnames = fieldnames(typeof(x))
+        return NamedTuple{fnames}(Tuple(_zarr_checkpoint_sanitize(getfield(x, f)) for f in fnames))
+    else
+        return string(x)
+    end
+end
+
+function _restore_zarr_centroids(c)
+    if c isa AbstractMatrix && size(c, 2) >= 2
+        return [(Float64(c[i, 1]), Float64(c[i, 2])) for i in 1:size(c, 1)]
+    end
+    return c
+end
+
+function _restore_zarr_polygons(p)
+    if p isa NamedTuple && haskey(p, :indptr) && haskey(p, :x) && haskey(p, :y)
+        n = length(p.indptr) - 1
+        return [
+            [(Float64(p.x[k]), Float64(p.y[k])) for k in p.indptr[i]:(p.indptr[i + 1] - 1)]
+            for i in 1:n
+        ]
+    end
+    return p
+end
+
+function _restore_zarr_mesh(m)
+    m isa NamedTuple || return m
+    ks = keys(m)
+    vs = map(ks) do k
+        v = m[k]
+        if k in (:centroids, :centroids_km, :centroids_lonlat)
+            _restore_zarr_centroids(v)
+        elseif k in (:polygons, :polygons_km, :polygons_lonlat)
+            _restore_zarr_polygons(v)
+        elseif k in (:W, :W_raw) && v isa AbstractMatrix
+            sparse(Float64.(v))
+        else
+            v
+        end
+    end
+    return NamedTuple{ks}(vs)
+end
+
+function _restore_zarr_month_lookup(ml)
+    ml isa AbstractDict || return ml
+    out = Dict{Tuple{Int, Int}, Int}()
+    for (k, v) in pairs(ml)
+        if k isa Tuple{Int, Int}
+            out[k] = Int(v)
+        else
+            nums = [parse(Int, m.match) for m in eachmatch(r"-?\d+", string(k))]
+            if length(nums) >= 2
+                out[(nums[1], nums[2])] = Int(v)
+            end
+        end
+    end
+    return out
+end
+
+function _zarr_checkpoint_restore_loaded(loaded)
+    loaded isa NamedTuple || return loaded
+    ks = keys(loaded)
+    vs = map(ks) do k
+        v = loaded[k]
+        if k === :mesh
+            _restore_zarr_mesh(v)
+        elseif k === :W && v isa AbstractMatrix
+            sparse(Float64.(v))
+        elseif k === :month_lookup
+            _restore_zarr_month_lookup(v)
+        elseif k === :data && v isa NamedTuple
+            _zarr_checkpoint_restore_loaded(v)
+        elseif k === :parsed_depth_range && v isa AbstractDict &&
+               haskey(v, "1") && haskey(v, "2")
+            (Float64(v["1"]), Float64(v["2"]))
+        else
+            v
+        end
+    end
+    return NamedTuple{ks}(vs)
+end
+
+function _zarr_checkpoint_restore_fitted(fitted)
+    fitted isa NamedTuple || return fitted
+    models_r = haskey(fitted, :models) && fitted.models isa AbstractDict ?
+        Dict{Symbol, Any}(Symbol(k) => v for (k, v) in pairs(fitted.models)) :
+        get(fitted, :models, Dict{Symbol, Any}())
+    chains_r = haskey(fitted, :chains) && fitted.chains isa AbstractDict ?
+        Dict{Symbol, Any}(Symbol(k) => v for (k, v) in pairs(fitted.chains)) :
+        get(fitted, :chains, Dict{Symbol, Any}())
+    return (models = models_r, chains = chains_r)
+end
+
 function run_movement_analysis(
     params = movement_parameters_default()
 )::NamedTuple
 
-    out_dir = params.output_dir
+    out_dir = _resolve_output_dir(params.output_dir)
     mkpath(out_dir)
 
     # Panel failures are collected per run, so a previous run's dead panels are
     # never reported against this one.
     empty!(PANEL_SKIPS)
 
-    results_checkpoint = joinpath(out_dir, "movement_results_checkpoint.jld2")
+    results_checkpoint = joinpath(out_dir, "movement_results_checkpoint.zarr")
 
     # --figures-only: load the full results checkpoint and re-render dashboards
     # without re-running any computation.
     if params.figures_only
-        isfile(results_checkpoint) || error(
+        ispath(results_checkpoint) || error(
             "[figures-only] Full results checkpoint not found: $results_checkpoint\n" *
             "Run the pipeline at least once without --figures-only to create it."
         )
         params.verbose && println(
             "\n[figures-only] Loading results checkpoint: $results_checkpoint"
         )
-        rc = JLD2.load(results_checkpoint)
-        loaded_r             = rc["loaded"]
+        rc = Tethys.read_data(results_checkpoint)
+        loaded_r             = _zarr_checkpoint_restore_loaded(rc["loaded"])
+        _enrich_obs_traits_from_tagging!(loaded_r, params)
+        loaded_r             = _ensure_region_map(loaded_r, params)
         kernels_r            = rc["kernels"]
         path_res_r           = rc["path_res"]
         diagnostics_r        = rc["diagnostics"]
@@ -3266,14 +5911,28 @@ function run_movement_analysis(
         agent_space_use_r    = get(rc, "agent_space_use", nothing)
 
         # Force render_html on so figures are actually written.
-        params_render = merge(params, (render_html = true,))
+        params_render = params isa TethysPathConfig ?
+            apply_overrides(params, Dict{Symbol, Any}(:render_html => true)) :
+            merge(params, (render_html = true,))
 
         params_render.verbose && println("\n[figures-only] Regenerating dashboards...")
-        export_dashboards(
+        dash_r = export_dashboards(
             loaded_r, kernels_r, path_res_r, diagnostics_r,
             params_render, validation_r, agent_trajectories_r,
             agent_space_use_r
         )
+        try
+            step_yr = _step_years(params_render, loaded_r)
+            tb_stats = compute_tethysbio_movement_stats(
+                loaded_r, kernels_r, path_res_r;
+                step_years = step_yr,
+                species = params_render.species_name
+            )
+            write_tethysbio_movement_stats(tb_stats; store_dir = out_dir)
+        catch e
+            _record_panel_skip("TethysBio movement stats export", e)
+        end
+        report_panel_skips()
         params_render.verbose && println("\n[figures-only] Done.")
 
         return (
@@ -3300,24 +5959,27 @@ function run_movement_analysis(
         )
     end
 
-    checkpoint_file = joinpath(out_dir, "movement_checkpoint.jld2")
+    checkpoint_file = joinpath(out_dir, "movement_checkpoint.zarr")
     resume_from_checkpoint = params.resume_from_checkpoint
 
-    loaded, fitted, kernels = if resume_from_checkpoint && isfile(checkpoint_file)
+    loaded, fitted, kernels = if resume_from_checkpoint && ispath(checkpoint_file)
         if params.verbose
             println("\n[Checkpoint] Resuming from existing checkpoint: $checkpoint_file")
         end
-        data = JLD2.load(checkpoint_file)
+        data = Tethys.read_data(checkpoint_file)
+
+        loaded_r = _zarr_checkpoint_restore_loaded(data["loaded"])
+        _enrich_obs_traits_from_tagging!(loaded_r, params)
+        loaded_r = _ensure_region_map(loaded_r, params)
 
         # --tessellation-only is honoured here too; see the note on the load branch.
         if params.tessellation_only
-            loaded_r = data["loaded"]
             return _tessellation_only_result(
                 loaded_r, tessellation_preview(loaded_r, params), params,
             )
         end
 
-        (data["loaded"], data["fitted"], data["kernels"])
+        (loaded_r, _zarr_checkpoint_restore_fitted(data["fitted"]), data["kernels"])
     else
         loaded_  = load_movement_data(params)
 
@@ -3339,7 +6001,14 @@ function run_movement_analysis(
         if params.verbose
             println("\n[Checkpoint] Saving intermediate states to: $checkpoint_file")
         end
-        JLD2.save(checkpoint_file, "loaded", loaded_, "fitted", fitted_, "kernels", kernels_)
+        Tethys.write_data(
+            checkpoint_file,
+            _zarr_checkpoint_sanitize(
+                Dict("loaded" => loaded_, "fitted" => fitted_, "kernels" => kernels_)
+            );
+            backend = :zarr,
+            overwrite = true
+        )
         
         (loaded_, fitted_, kernels_)
     end
@@ -3377,12 +6046,37 @@ function run_movement_analysis(
             _resolve_centroids(loaded.mesh, size(kernels.P_kernel, 1))
         agent_centroids = agent_planar === nothing ? agent_lonlat : agent_planar
 
-        # Dynamic vs static kernel selection for agent forward simulation
-        P_agent_kernel = if params.dynamic_kernels && params.use_geodata_habitat &&
-                            agent_lonlat !== nothing
+        # Dynamic vs static kernel selection for agent forward simulation.
+        # Build 12 monthly sparse kernels and index each step by its true calendar month
+        # rather than allocating thousands of dense matrices at 1 month per day.
+        step_yr_ag = _step_years(params, loaded)
+        P_agent_kernel = if params.dynamic_kernels &&
+                            hasproperty(loaded, :monthly_hsi) &&
+                            size(loaded.monthly_hsi, 1) == loaded.n_spatial &&
+                            size(loaded.monthly_hsi, 2) >= 12
             max_horizon = maximum(durations; init = params.agent_horizon)
-            months_seq = [mod1(params.temperature_month == 0 ? t : params.temperature_month + t - 1, 12)
-                          for t in 1:max_horizon]
+            n_cols_mh = size(loaded.monthly_hsi, 2)
+            P_12 = Vector{SparseMatrixCSC{Float64, Int}}(undef, 12)
+            for m in 1:12
+                m_cols = collect(m:12:n_cols_mh)
+                h_clim = vec(mean(@view(loaded.monthly_hsi[:, m_cols]); dims = 2))
+                P_12[m] = sparse(construct_stochastic_transition_kernel(
+                    loaded.W, h_clim;
+                    gamma     = kernels.gamma_hat,
+                    residence = kernels.rho_hat,
+                    advection = kernels.alpha_hat,
+                    land_mask = loaded.land_mask
+                ))
+            end
+            start_mo = params.temperature_month > 0 ? params.temperature_month : 7
+            P_seq = Vector{SparseMatrixCSC{Float64, Int}}(undef, max_horizon)
+            for t in 1:max_horizon
+                P_seq[t] = P_12[mod1(start_mo + floor(Int, (t - 1) * step_yr_ag * 12.0), 12)]
+            end
+            P_seq
+        elseif params.dynamic_kernels && params.use_geodata_habitat &&
+               agent_lonlat !== nothing
+            max_horizon = maximum(durations; init = params.agent_horizon)
             min_lon = minimum(c[1] for c in agent_lonlat)
             max_lon = maximum(c[1] for c in agent_lonlat)
             min_lat = minimum(c[2] for c in agent_lonlat)
@@ -3390,23 +6084,31 @@ function run_movement_analysis(
             mesh_polys = (params.spatial_averaging != "centroid" &&
                           hasproperty(loaded.mesh, :polygons_lonlat)) ?
                          loaded.mesh.polygons_lonlat : nothing
-            hsi_agent_dyn = build_dynamic_geodata_hsi_series(
+            hsi_12 = build_dynamic_geodata_hsi_series(
                 agent_lonlat;
                 polygons           = mesh_polys,
                 lon_range          = (min_lon, max_lon),
                 lat_range          = (min_lat, max_lat),
-                months             = months_seq,
+                months             = collect(1:12),
                 temperature_source = params.temperature_source,
                 verbose            = false
             )
-            hsi_list = [hsi_agent_dyn[:, t] for t in 1:max_horizon]
-            construct_dynamic_transition_kernels(
-                loaded.W, hsi_list;
-                gamma     = kernels.gamma_hat,
-                residence = kernels.rho_hat,
-                advection = kernels.alpha_hat,
-                land_mask = loaded.land_mask
-            )
+            P_12 = Vector{SparseMatrixCSC{Float64, Int}}(undef, 12)
+            for m in 1:12
+                P_12[m] = sparse(construct_stochastic_transition_kernel(
+                    loaded.W, @view(hsi_12[:, m]);
+                    gamma     = kernels.gamma_hat,
+                    residence = kernels.rho_hat,
+                    advection = kernels.alpha_hat,
+                    land_mask = loaded.land_mask
+                ))
+            end
+            start_mo = params.temperature_month > 0 ? params.temperature_month : 7
+            P_seq = Vector{SparseMatrixCSC{Float64, Int}}(undef, max_horizon)
+            for t in 1:max_horizon
+                P_seq[t] = P_12[mod1(start_mo + floor(Int, (t - 1) * step_yr_ag * 12.0), 12)]
+            end
+            P_seq
         else
             sparse(kernels.P_kernel)
         end
@@ -3444,20 +6146,39 @@ function run_movement_analysis(
         params.verbose && println(
             "\n[Checkpoint] Saving full results to: $results_checkpoint"
         )
-        JLD2.save(
+        Tethys.write_data(
             results_checkpoint,
-            "loaded",             loaded,
-            "kernels",            kernels,
-            "path_res",           path_res,
-            "diagnostics",        diagnostics,
-            "validation",         validation,
-            "agent_trajectories", agent_trajectories,
-            "agent_space_use",    agent_space_use,
+            _zarr_checkpoint_sanitize(Dict(
+                "loaded" => loaded,
+                "kernels" => kernels,
+                "path_res" => path_res,
+                "diagnostics" => diagnostics,
+                "validation" => validation,
+                "agent_trajectories" => agent_trajectories,
+                "agent_space_use" => agent_space_use
+            ));
+            backend = :zarr,
+            overwrite = true
         )
     catch e
 _record_panel_skip("Results checkpoint write", e); params.verbose && println(
 "  (Results checkpoint write skipped: $(_error_note(e)))"
             )
+    end
+
+    try
+        step_yr = _step_years(params, loaded)
+        tb_stats = compute_tethysbio_movement_stats(
+            loaded, kernels, path_res;
+            step_years = step_yr,
+            species = params.species_name
+        )
+        write_tethysbio_movement_stats(tb_stats; store_dir = out_dir)
+    catch e
+        _record_panel_skip("TethysBio movement stats export", e)
+        params.verbose && println(
+            "  (TethysBio movement stats export skipped: $(_error_note(e)))"
+        )
     end
 
     # Reported unconditionally, not under `verbose`. A panel that fails on every

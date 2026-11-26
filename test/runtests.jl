@@ -2,10 +2,9 @@
 # TethysPath Comprehensive Test Suite Orchestrator
 # ==============================================================================
 
-import Pkg
-
 const RUNNING_UNDER_PKG_TEST = basename(dirname(Base.active_project())) == "test"
 if !RUNNING_UNDER_PKG_TEST
+    import Pkg
     Pkg.activate(joinpath(@__DIR__, ".."); io = devnull)
     Pkg.instantiate(; io = devnull)
 end
