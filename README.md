@@ -1,3 +1,8 @@
+# To see the webpage: 
+
+https://mum0n.github.io/TethysPath/
+
+
 # TethysPath.jl
 
 Discrete-space animal movement inference, conditioned Markov-bridge trajectory reconstruction, and spatial connectivity analysis in Julia.
