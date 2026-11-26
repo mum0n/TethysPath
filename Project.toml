@@ -23,14 +23,12 @@ GeoInterface = "cf35fbd7-0cd7-5166-be24-54bfbe79505f"
 GeoJSON = "61d90e0f-e114-555e-ac52-39dfb47a3ef9"
 GeometryBasics = "5c1252a2-5f33-56bf-86c9-59e7332b4326"
 Graphs = "86223c79-3864-5bf0-83f7-82e725a168b6"
-HypertextLiteral = "ac1192a8-f4b3-4bfe-ba22-af5b92cd3ab2"
 JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
 JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
 LibGEOS = "a90b1aa1-3769-5649-ba7e-abc5a9d163eb"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 NearestNeighbors = "b8a86587-4115-5ab1-83bc-aa920d37bbce"
 OrderedCollections = "bac558e1-5e72-5ebc-8fee-abe8a469f55d"
-PlutoUI = "7f904dfe-b85e-4ff6-b463-dae2292396a8"
 Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
@@ -40,9 +38,9 @@ Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 StatsBase = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
 TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 Tethys = "013929ef-fbce-4b30-8473-b78df773f4d1"
+TethysBio = "bae43cc6-7657-4fb8-ab4c-0421eb5c519e"
 Turing = "fce5fe82-541a-59a6-adf8-730c64b5f9a0"
 Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
-ZMQ = "c2297ded-f4af-51ae-bb23-16f91089e4e1"
 
 [weakdeps]
 Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
@@ -50,6 +48,7 @@ RCall = "6f49c342-dc21-5d91-9882-a32aef131414"
 
 [sources]
 Tethys = {path = "../Tethys"}
+TethysBio = {path = "../TethysBio"}
 
 [extensions]
 TethysPathPlottingExt = "Plots"
@@ -62,11 +61,8 @@ DynamicPPL = "0.42.14"
 FlexiChains = "0.6.43"
 ForwardDiff = "1.4.6"
 GeometryBasics = "0.5.13"
-HypertextLiteral = "1.0.0"
-PlutoUI = "0.7.83"
 Serialization = "1.11.0"
 Tethys = "0.1"
-ZMQ = "1.5.1"
 
 [extras]
 DynamicPPL = "366bfd00-2699-11ea-058f-f148b4cae6d8"

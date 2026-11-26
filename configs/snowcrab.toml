@@ -19,10 +19,10 @@ model_modes = ["telemetry", "agent"]
 # -----------------------------------------------------------------------------
 # Input files
 # -----------------------------------------------------------------------------
-tagging_file = "data/tagging.jld2"   # Mark-recapture release/recapture events
-hsi_file = "data/hsi.jld2"           # Habitat suitability time series
-sppoly_file = "data/sppoly.jld2"     # Spatial polygon unit definitions
-# surveydata_file = "data/surveydata.jld2" # Paired survey observations (optional)
+tagging_file = "inputs/tagging.jld2"   # Mark-recapture release/recapture events
+hsi_file = "inputs/hsi.zarr"           # Habitat suitability time series
+sppoly_file = "inputs/sppoly.jld2"     # Spatial polygon unit definitions
+# surveydata_file = "inputs/surveydata.jld2" # Paired survey observations (optional)
 
 # -----------------------------------------------------------------------------
 # Spatial domain
@@ -34,9 +34,9 @@ bbox_padding_deg = 0.25
 # Land is identified from a global land/sea raster rather than a bundled coastline,
 # supplemented by high-resolution Sable Island polygons.
 land_source = "landmask"
-land_mask_resolution = "l"   # "c", "l", "i", "h", or "f"
-land_mask_grid_minutes = 5.0
-land_polygon_files = ["configs/geo/sable_island.geojson"]
+land_mask_resolution = "h"   # "c", "l", "i", "h", or "f"
+land_mask_grid_minutes = 1.25
+land_polygon_files = ["inputs/sable_island.geojson"]
 
 # Domain resharding and benthic depth constraints
 reshard_hex = false
@@ -49,9 +49,10 @@ hsi_ood_floor = 0.01
 # -----------------------------------------------------------------------------
 # Path reconstruction & Routing
 # -----------------------------------------------------------------------------
-max_paths = 25                   # Trajectories to reconstruct
-path_methods = ["astar"]         # Least-cost heuristic routing
-smooth_paths = true              # Marine line-of-sight smoothing
+max_paths = 300                  # Spatially stratified trajectories to reconstruct
+path_methods = ["bridge"]        # Conditioned Markov-bridge routing on posterior kernel
+smooth_paths = false             # Preserve habitat-guided marine graph waypoints
+fpt_step_years = 0.00273785      # Daily transition kernel step (1 / 365.25 yr)
 
 # -----------------------------------------------------------------------------
 # Dynamic Environmental Features & Advanced Routing
@@ -71,7 +72,7 @@ rest_advantage_form = "difference"
 # -----------------------------------------------------------------------------
 # Habitat Suitability & Tethys Environmental Sources
 # -----------------------------------------------------------------------------
-use_geodata_habitat = true           # Query real physical habitat via Tethys
+use_geodata_habitat = false          # Use survey hsi.zarr in Maritimes + homogeneous HSI in CFA19/S.Gulf
 temperature_source = "glorys12v1"    # Copernicus Marine GLORYS12V1 (1/12 deg)
 temperature_month = 0                # 0 for dynamic seasonal sequence / 1-12 for fixed
 bathymetry_source = "etopo2022"      # Bathymetry elevation/depth source
@@ -108,14 +109,14 @@ structural_uncertainty_scale = 0.05
 # -----------------------------------------------------------------------------
 # Diagnostics & Downstream Analysis
 # -----------------------------------------------------------------------------
-diagnostics = ["circuit", "stochastic", "bottlenecks", "validation"]
+diagnostics = ["circuit", "bottlenecks", "validation"]
 
 # -----------------------------------------------------------------------------
 # Output & Visualization
 # -----------------------------------------------------------------------------
 species_name = "Snow Crab"
 render_html = true
-output_dir = "output"
+output_dir = "../lakehouse/TethysPath"
 resume_from_checkpoint = false
 dark_mode = false
 cmap = "viridis"
@@ -125,5 +126,10 @@ verbose = true
 # -----------------------------------------------------------------------------
 # Stock Connectivity Regions
 # -----------------------------------------------------------------------------
-region_labels = []
-region_polygon_files = []
+region_labels = ["N-ENS", "S-ENS", "4X", "CFA19 / S.Gulf"]
+region_polygon_files = [
+    "inputs/cfanorth.dat",
+    "inputs/cfasouth.dat",
+    "inputs/cfa4x.dat",
+    "inputs/cfagulf.dat",
+]

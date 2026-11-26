@@ -4,8 +4,8 @@
 # All parameters are present with their declared defaults and complete explanations.
 #
 #   julia --project=. TethysPathRun.jl --config=configs/default.toml \
-#          --tagging-file=data/tagging.jld2 \
-#          --hsi-file=data/hsi.jld2 --sppoly-file=data/sppoly.jld2
+#          --tagging-file=inputs/tagging.jld2 \
+#          --hsi-file=inputs/hsi.zarr --sppoly-file=inputs/sppoly.jld2
 #
 # Command-line arguments override values specified in this file.
 # =============================================================================
@@ -24,10 +24,10 @@ model_modes = ["telemetry", "telemetry_and_survey", "agent"]
 # -----------------------------------------------------------------------------
 # Mark-recapture telemetry, habitat suitability, and spatial unit definitions.
 # If omitted or null, a synthetic dataset is generated for demonstrations.
-# tagging_file    = "data/tagging.jld2"    # Tagging encounters (release/recapture)
-# hsi_file        = "data/hsi.jld2"        # Habitat suitability spatial field
-# sppoly_file     = "data/sppoly.jld2"     # Spatial polygon areal units
-# surveydata_file = "data/surveydata.jld2" # Paired survey abundance data (optional)
+# tagging_file    = "inputs/tagging.jld2"    # Tagging encounters (release/recapture)
+# hsi_file        = "inputs/hsi.zarr"        # Habitat suitability spatial field
+# sppoly_file     = "inputs/sppoly.jld2"     # Spatial polygon areal units
+# surveydata_file = "inputs/surveydata.jld2" # Paired survey abundance data (optional)
 
 # -----------------------------------------------------------------------------
 # Spatial Domain and Mesh Partitioning
@@ -59,7 +59,7 @@ hsi_ood_floor = 0.01          # Minimum HSI below which units are out-of-domain
 # Path Reconstruction & Routing
 # -----------------------------------------------------------------------------
 max_paths = 1000              # Maximum individual trajectories to reconstruct
-path_methods = ["astar"]      # Methods: ["astar"], ["viterbi"], or both
+path_methods = ["bridge"]     # Methods: ["bridge"], ["viterbi"], or both
 smooth_paths = true           # Apply marine line-of-sight path smoothing
 
 # -----------------------------------------------------------------------------
@@ -87,7 +87,7 @@ rest_advantage_form = "difference"
 # -----------------------------------------------------------------------------
 # Bathymetry & Environmental Habitat Sources
 # -----------------------------------------------------------------------------
-# Ingestion of real physical habitat via Tethys / GeoDataSources:
+# Ingestion of real physical habitat via Tethys:
 use_geodata_habitat = false          # Query real bathymetry and bottom temperature
 bathymetry_source = "etopo2022"      # "etopo2022", "nwa", or path to .nc/.zarr
 temperature_source = "woa23"         # Hydrography provider: "woa23", "glorys12v1"
@@ -129,19 +129,18 @@ structural_uncertainty_scale = 0.05  # Scale of structural kernel perturbation
 # -----------------------------------------------------------------------------
 # List of post-fit diagnostic workflows to execute:
 #   "circuit"           -- Electrical network current density and pinchpoints
-#   "stochastic"        -- Stochastic least-cost path ensembles
 #   "bottlenecks"       -- Domain-wide bottleneck centrality index
-#   "validation"        -- Path confidence intervals and predictive checks
+#   "validation"        -- Corridor canalization, 1-yr connectivity, predictive checks
 #   "bayesian_ensemble" -- Full posterior corridor and trajectory ensembles
-diagnostics = ["circuit", "stochastic", "bottlenecks", "validation", "bayesian_ensemble"]
+diagnostics = ["circuit", "bottlenecks", "validation", "bayesian_ensemble"]
 
 # -----------------------------------------------------------------------------
 # Output & Visualization
 # -----------------------------------------------------------------------------
 species_name = "Animal"       # Species or population label in figures
 render_html = true            # Generate interactive Leaflet HTML dashboard
-output_dir = "output"         # Target directory for artifacts and figures
-resume_from_checkpoint = false# Resume from saved movement_results_checkpoint.jld2
+output_dir = "../lakehouse/TethysPath" # Target directory for artifacts and figures
+resume_from_checkpoint = false# Resume from saved movement_checkpoint.zarr
 dark_mode = false             # Dark theme for figures and HTML dashboards
 cmap = "viridis"              # Colormap for suitability and potential fields
 overlay_hsi = false           # Overlay HSI raster on trajectory plots

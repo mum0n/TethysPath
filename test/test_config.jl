@@ -4,7 +4,7 @@ include("test_fixtures.jl")
     p_def = movement_parameters_default()
     @test p_def isa TethysPathConfig
     @test p_def.tagging_file === nothing
-    @test p_def.path_methods == [:astar]
+    @test p_def.path_methods == [:bridge]
     @test p_def.model_modes isa Vector{Symbol}
     @test p_def.diagnostics isa Vector{Symbol}
     @test p_def.land_source === :landmask
@@ -12,7 +12,7 @@ include("test_fixtures.jl")
     c = TethysPathConfig(; tagging_file = "x.jld2", n_samples = 7)
     @test c.tagging_file == "x.jld2"
     @test c.n_samples == 7
-    @test c.path_methods == [:astar]
+    @test c.path_methods == [:bridge]
 
     c2 = load_config(cli_args = [
         "--samples=9", "--warmup=4", "--depth-range=10,50",
@@ -79,11 +79,11 @@ include("test_fixtures.jl")
         TethysPathConfig(), Dict{Symbol,Any}(:not_a_field => 1))
 
     for bad_flag in ("--diagnostics=valdiation", "--model-modes=telmetry",
-                "--path-methods=astar,dijkstra")
+                "--path-methods=astar", "--path-methods=bridge,dijkstra")
         @test_throws ArgumentError load_config(cli_args = [bad_flag])
     end
     @test load_config(cli_args = ["--diagnostics=validation"]).diagnostics == [:validation]
-    @test load_config(cli_args = ["--path-methods=astar,viterbi"]).path_methods == [:astar, :viterbi]
+    @test load_config(cli_args = ["--path-methods=bridge,viterbi"]).path_methods == [:bridge, :viterbi]
 
     s = create_argparse_settings()
     @test s isa ArgParse.ArgParseSettings

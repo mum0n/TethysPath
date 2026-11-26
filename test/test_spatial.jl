@@ -25,7 +25,7 @@ include("test_fixtures.jl")
     @test bbox_explicit == (-62.0, 44.0, -60.0, 46.0)
 
     # prune_mesh
-    m_test = build_hex_mesh_planar([-64.0, -62.0], [44.0, 46.0]; radius_km = 30.0)
+    m_test = build_hex_mesh([-64.0, -62.0], [44.0, 46.0]; radius_km = 30.0)
     S_orig = m_test.n_units
     keep_mask = falses(S_orig)
     keep_mask[1:div(S_orig, 2)] .= true

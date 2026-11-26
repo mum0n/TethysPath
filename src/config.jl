@@ -29,11 +29,11 @@ The complete set of accepted entries in the three list-valued settings.
 These are the only places the allowed values are written down, so the CLI help,
 the default and the load-time validation cannot drift apart.
 """
-const DIAGNOSTIC_CHOICES = Set([:circuit, :stochastic, :bottlenecks,
+const DIAGNOSTIC_CHOICES = Set([:circuit, :bottlenecks,
                                 :validation, :bayesian_ensemble,
                                 :connectivity, :recapture])
-  const MODEL_MODE_CHOICES = Set([:telemetry, :telemetry_and_survey, :agent])
-const PATH_METHOD_CHOICES = Set([:astar, :viterbi])
+const MODEL_MODE_CHOICES = Set([:telemetry, :telemetry_and_survey, :agent])
+const PATH_METHOD_CHOICES = Set([:bridge, :viterbi])
 
 """
     TethysPathConfig
@@ -85,7 +85,7 @@ Base.@kwdef struct TethysPathConfig
 
     # --- Path reconstruction -------------------------------------------------
     max_paths::Int = 1000
-    path_methods::Vector{Symbol} = Symbol[:astar]
+    path_methods::Vector{Symbol} = Symbol[:bridge]
     smooth_paths::Bool = true
 
     # --- Advanced routing ----------------------------------------------------
@@ -161,7 +161,7 @@ Base.@kwdef struct TethysPathConfig
 
     # --- Diagnostics ---------------------------------------------------------
     diagnostics::Vector{Symbol} = Symbol[
-        :circuit, :stochastic, :bottlenecks, :validation, :bayesian_ensemble
+        :circuit, :bottlenecks, :validation, :bayesian_ensemble
     ]
 
     # --- Time-resolved connectivity (diagnostic :connectivity) ----------------
@@ -178,12 +178,10 @@ Base.@kwdef struct TethysPathConfig
 
     # --- Output and reporting ------------------------------------------------
     species_name::String = "Animal"
-    # Interactive Leaflet HTML dashboards were consolidated into the notebook
-    # (notebooks/TethysPathNotes.jl); the package defaults to rendering no HTML so a
-    # plain run writes only CSVs, figures and checkpoints. Override explicitly with
-    # --render-html=true to regenerate legacy dashboards.
-    render_html::Bool = false
-    output_dir::String = "output"
+    # Render path, corridor, bottleneck, circuit, and diagnostic HTML visualizations
+    # alongside CSVs and checkpoints into the lakehouse store (`../lakehouse/TethysPath`).
+    render_html::Bool = true
+    output_dir::String = "../lakehouse/TethysPath"
     resume_from_checkpoint::Bool = false
     dark_mode::Bool = false
     cmap::Symbol = :viridis
@@ -199,7 +197,7 @@ Base.@kwdef struct TethysPathConfig
     # Not part of the analysis; set by the parser and never read by the pipeline.
     show_help::Bool = false
     # When true, skip all computation and regenerate dashboards from the saved
-    # full results checkpoint (movement_results_checkpoint.jld2).  Implies
+    # full results checkpoint (movement_results_checkpoint.zarr).  Implies
     # render_html=true.  Requires a prior successful run.
     figures_only::Bool = false
     # When true, build the mesh, open the tessellation map in a browser, and stop.
@@ -332,11 +330,11 @@ function apply_overrides(
             ]
         end
         if !haskey(effective_overlay, :path_methods)
-            effective_overlay[:path_methods] = Symbol[:astar, :viterbi]
+            effective_overlay[:path_methods] = Symbol[:bridge, :viterbi]
         end
         if !haskey(effective_overlay, :diagnostics)
             effective_overlay[:diagnostics] = Symbol[
-                :circuit, :stochastic, :bottlenecks, :validation,
+                :circuit, :bottlenecks, :validation,
                 :bayesian_ensemble, :connectivity, :recapture
             ]
         end
@@ -619,7 +617,7 @@ function create_argparse_settings()::ArgParseSettings
             metavar = "N"
         "--path-methods"
             dest_name = "path_methods"
-            help = "Comma-separated routing methods: astar, viterbi."
+            help = "Comma-separated routing methods: bridge, viterbi."
             arg_type = String
             metavar = "METHODS"
         "--smooth-paths"
@@ -733,7 +731,7 @@ function create_argparse_settings()::ArgParseSettings
         "--render-html"
             dest_name = "render_html"
             help = "Render the legacy interactive HTML dashboards (default off; " *
-                   "dashboards live in notebooks/TethysPathNotes.jl)."
+                   "results inspection is documented in docs/TethysPathNotes.md)."
             arg_type = Bool
         "--output-dir"
             dest_name = "output_dir"
@@ -770,7 +768,7 @@ function create_argparse_settings()::ArgParseSettings
         "--figures-only"
             dest_name = "figures_only"
             help = "Regenerate all HTML dashboards from a saved results " *
-                   "checkpoint (movement_results_checkpoint.jld2) without " *
+                   "checkpoint (movement_results_checkpoint.zarr) without " *
                    "re-running MCMC, path reconstruction, or diagnostics. " *
                    "Implies --render-html=true. Requires a prior successful run."
             arg_type = Bool

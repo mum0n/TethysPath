@@ -30,6 +30,9 @@ using FFTW
 using JLD2
 using Turing
 using Tethys
+using Tethys: point_in_polygon, polygons_intersect
+import TethysBio
+using TethysBio: build_monthly_hsi_matrix, load_hsi_jld2
 
 # Source modules in logical dependency order
 include("config.jl")
@@ -51,62 +54,58 @@ include("agent_movement.jl")
 
 export
     # Spatial Mesh & Partitioning Utilities
-    build_hex_mesh_planar,
+    build_hex_mesh,
     build_hex_mesh_clipped,
     lonlat_to_xy_km,
     xy_km_to_lonlat,
+    haversine_distance,
+    coordinate_space_of,
+    bearing_deg,
     map_to_units,
     map_point_to_units,
     assign_spatial_units,
     get_polygon_area,
-    mask_raster_to_mesh,
-    sample_bathymetry_to_mesh,
-    generate_synthetic_shelf_bathymetry,
-    compute_hydrodynamics,
-    extract_flow_interpolator,
-    create_planar_projection,
-    forward_project,
-    inverse_project,
+    project_forward,
+    project_inverse,
 
     # Domain & Topographic Spatial Pruning
     prune_mesh,
-    prune_mesh_by_boundary,
-    prune_mesh_by_landmask,
-    prune_mesh_by_depth,
-    build_mesh_spatial_index,
-    point_in_polygon_libgeos,
-    points_in_polygon_batch,
     spatial_weights_matrix,
-    polygon_adjacency_matrix,
-    polygon_centroids_and_areas,
-    hex_vertices_planar,
-    bounding_box_filter,
-    filter_dataframe_by_domain,
-    validate_spatial_dataframe,
 
-    # Probabilistic Turing Models
-    GaussianObservationModel,
-    fit_state_space_trajectory,
-    fit_kernel_markov,
-
-    # Biological Habitat & Kernel Models
-    build_habitat_suitability_index,
-    build_transition_kernel,
-    simulate_trajectories,
-    build_dynamic_transition_kernel,
+    # Probabilistic Turing Models & Kernels
+    pure_telemetry_turing_model,
+    build_sparse_transition_kernel,
+    kstep_transition_cache,
+    movement_alpha_rho,
+    local_hsi_advantage,
+    residency_from_advantage,
+    construct_stochastic_transition_kernel,
     build_geodata_habitat_suitability,
     build_dynamic_geodata_hsi_series,
+    model_trait_movement_associations,
+    compute_directed_flux_field,
+    analyze_bathymetric_migration,
+    evaluate_dispersal_scaling_and_null,
+    analyze_biological_state_stratification,
+    validate_mark_recapture_indices,
 
-    # Least-Cost & Stochastic Routing
-    dijkstra_least_cost_path,
-    astar_corridor_corridors,
-    effective_distance_matrix,
+    # Agent Movement & Forward Projection
+    simulate_agent_trajectories,
+    forward_project_agents,
+    forward_space_use,
+
+    # Probabilistic Routing & Spatial Diagnostics
+    predict_bridge_path,
+    compute_spatial_bearing_roses,
+    analyze_gradient_taxis_projections,
+    compute_corridor_canalization,
+    fit_datasource_stratified_kernels,
 
     # Circuit Theory Connectivity
-    conductance_matrix,
-    solve_current_map,
-    commute_distance_matrix,
-    resistance_covariance_matrix,
+    build_circuit_laplacian,
+    solve_circuit_voltage,
+    effective_resistance_matrix,
+    current_density_map,
 
     # Configuration
     TethysPathConfig,
@@ -122,17 +121,21 @@ export
     movement_store_status,
     assimilate_movement_inputs,
     read_assimilated_movement_inputs,
+    compute_tethysbio_movement_stats,
+    write_tethysbio_movement_stats,
 
     # Pipeline Orchestration
     movement_parameters_default,
     load_movement_data,
     load_movement_dataset,
-    load_survey_data,
 
     # Spatial data sources
     resolve_bbox,
     bbox_of,
     land_mask_from_global_mask,
+    sever_raster_land_edges!,
+    clip_polygons_to_ocean!,
+    mask_enclosed_inland_pockets!,
     land_mask_from_polygon_files,
     read_polygon_file,
     read_domain_polygon,
@@ -146,6 +149,9 @@ export
     fit_movement_models,
     extract_transition_kernels,
     reconstruct_paths_and_diagnostics,
+    classify_liberty_interval,
+    smooth_marine_polyline,
+    reconstruct_all_event_trajectories,
     compute_advanced_diagnostics,
     execute_validation_analyses,
     run_movement_analysis,

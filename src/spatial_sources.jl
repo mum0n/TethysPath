@@ -264,30 +264,298 @@ function _read_gzip_bytes(file::AbstractString, token::AbstractString, resolutio
     end
 end
 
-"""
-    land_mask_from_global_mask(centroids_lonlat; resolution, grid_minutes) -> BitVector
+function _is_raster_non_ocean(
+    lon::Vector{Float64},
+    lat::Vector{Float64},
+    data::Matrix{UInt8},
+    lon0::Float64,
+    dlon::Float64,
+    lat0::Float64,
+    dlat::Float64,
+    x::Float64,
+    y::Float64
+)::Bool
+    i = mod1(1 + round(Int, (x - lon0) / dlon), length(lon))
+    j = min(length(lat), max(1, 1 + round(Int, (y - lat0) / dlat)))
+    # In GMT/basemap lsmask: 0 = ocean; 1 = land, 2 = lake, 3 = island_in_lake, 4 = pond.
+    return data[i, j] != 0x00
+end
 
-Classify each unit centroid as land using the global land/sea mask from
-matplotlib's basemap (originally GMT). The mask is a coarse global raster, so it
-answers "is this on a continent or island" without any study-area coastline being
-bundled with the package.
+"""
+    land_mask_from_global_mask(centroids_lonlat; polygons, resolution, grid_minutes) -> BitVector
+
+Classify each unit as non-marine (`true`) using the GMT/basemap land/sea/lake mask
+where `0` is ocean and `>= 1` denotes terrestrial land or inland lakes. When `polygons`
+are supplied, units whose half-radius interior points overlap land/lakes at >= 2
+vertices are also masked so coastal hexagons do not sit inland.
 """
 function land_mask_from_global_mask(
     centroids_lonlat::AbstractVector;
+    polygons::Union{Nothing, AbstractVector} = nothing,
     resolution::AbstractString = "l",
     grid_minutes::Real = 5.0
 )::BitVector
     lon, lat, data = _basemap_mask_data(resolution, grid_minutes)
     lon0, dlon = first(lon), (last(lon) - first(lon)) / (length(lon) - 1)
     lat0, dlat = first(lat), (last(lat) - first(lat)) / (length(lat) - 1)
-    mask = falses(length(centroids_lonlat))
-    for (k, c) in enumerate(centroids_lonlat)
-        x, y = Float64(c[1]), Float64(c[2])
-        i = mod1(1 + round(Int, (x - lon0) / dlon), length(lon))
-        j = 1 + round(Int, (y - lat0) / dlat)
-        mask[k] = data[i, j] == 1
+    n = length(centroids_lonlat)
+    mask = falses(n)
+    has_polys = polygons !== nothing && length(polygons) == n
+
+    for k in 1:n
+        cx, cy = Float64(centroids_lonlat[k][1]), Float64(centroids_lonlat[k][2])
+        if _is_raster_non_ocean(lon, lat, data, lon0, dlon, lat0, dlat, cx, cy)
+            mask[k] = true
+            continue
+        end
+        if has_polys && length(polygons[k]) >= 3
+            ring = polygons[k]
+            n_v = length(ring) - (ring[1] == ring[end] ? 1 : 0)
+            n_hit = 0
+            for vi in 1:n_v
+                vx, vy = Float64(ring[vi][1]), Float64(ring[vi][2])
+                mx = 0.5 * (cx + vx)
+                my = 0.5 * (cy + vy)
+                if _is_raster_non_ocean(lon, lat, data, lon0, dlon, lat0, dlat, mx, my)
+                    n_hit += 1
+                    if n_hit >= 2
+                        mask[k] = true
+                        break
+                    end
+                end
+            end
+        end
     end
     return mask
+end
+
+"""
+    sever_raster_land_edges!(W, centroids_lonlat; resolution="h", grid_minutes=1.25, n_substeps=49)
+
+Sever symmetric adjacency edges `(u, v)` in `W` whose straight-line geographic chord
+intersects non-ocean pixels (`data != 0x00`, covering both terrestrial land and inland
+lakes) on the GMT/basemap raster:
+
+    W_marine[u, v] = 0  if exists s in [0.02, 0.98] : mask((1 - s)*c_u + s*c_v) != 0
+
+Inputs:
+- `W`: Square `S x S` spatial adjacency matrix (mutated in place).
+- `centroids_lonlat`: Length-`S` vector of `(lon, lat)` centroids in decimal degrees.
+- `resolution`: GMT/basemap coastline tier (`"c"`, `"l"`, `"i"`, `"h"`, or `"f"`).
+- `grid_minutes`: Raster spacing in arc-minutes (`1.25`, `2.5`, `5.0`, or `10.0`).
+- `n_substeps`: Number of interior chord checkpoints (`>= 3`).
+
+Outputs:
+Integer count of directed matrix entries zeroed (`2` per undirected edge severed).
+"""
+function sever_raster_land_edges!(
+    W::AbstractMatrix{<:Real},
+    centroids_lonlat::AbstractVector;
+    resolution::AbstractString = "h",
+    grid_minutes::Real = 1.25,
+    n_substeps::Int = 49
+)::Int
+    S = size(W, 1)
+    length(centroids_lonlat) == S || throw(DimensionMismatch(
+        "centroids_lonlat length ($(length(centroids_lonlat))) != W size ($S)."
+    ))
+    lon, lat, data = _basemap_mask_data(resolution, grid_minutes)
+    lon0, dlon = first(lon), (last(lon) - first(lon)) / (length(lon) - 1)
+    lat0, dlat = first(lat), (last(lat) - first(lat)) / (length(lat) - 1)
+    fracs = range(0.02, 0.98; length = max(3, n_substeps))
+
+    severed = 0
+    if W isa SparseMatrixCSC
+        rows = rowvals(W)
+        for u in 1:S
+            x1, y1 = Float64(centroids_lonlat[u][1]), Float64(centroids_lonlat[u][2])
+            for ptr in nzrange(W, u)
+                v = rows[ptr]
+                v <= u && continue
+                x2, y2 = Float64(centroids_lonlat[v][1]), Float64(centroids_lonlat[v][2])
+                dx = x2 - x1
+                dy = y2 - y1
+                hit = false
+                for s in fracs
+                    if _is_raster_non_ocean(lon, lat, data, lon0, dlon, lat0, dlat,
+                                            x1 + s * dx, y1 + s * dy)
+                        hit = true
+                        break
+                    end
+                end
+                if hit
+                    W[u, v] = 0.0
+                    W[v, u] = 0.0
+                    severed += 2
+                end
+            end
+        end
+        severed > 0 && dropzeros!(W)
+    else
+        for u in 1:S
+            x1, y1 = Float64(centroids_lonlat[u][1]), Float64(centroids_lonlat[u][2])
+            for v in (u + 1):S
+                (W[u, v] == 0.0 && W[v, u] == 0.0) && continue
+                x2, y2 = Float64(centroids_lonlat[v][1]), Float64(centroids_lonlat[v][2])
+                dx = x2 - x1
+                dy = y2 - y1
+                for s in fracs
+                    if _is_raster_non_ocean(lon, lat, data, lon0, dlon, lat0, dlat,
+                                            x1 + s * dx, y1 + s * dy)
+                        W[u, v] = 0.0
+                        W[v, u] = 0.0
+                        severed += 2
+                        break
+                    end
+                end
+            end
+        end
+    end
+    return severed
+end
+
+"""
+    clip_polygons_to_ocean!(polygons_lonlat, centroids_lonlat; land_mask=nothing, resolution="h", grid_minutes=1.25)
+
+Retract coastal polygon vertices radially toward their marine centroid `(c_x, c_y)`
+whenever a ray from centroid to vertex `(v_x, v_y)` enters terrestrial land or an
+inland lake on the global raster (`s_safe = 0.92 * s_last_ocean`).
+
+Inputs:
+- `polygons_lonlat`: Vector of polygon vertex rings `[(lon, lat), ...]` in degrees (mutated in place).
+- `centroids_lonlat`: Vector of unit centroids `(lon, lat)` in decimal degrees.
+- `land_mask`: Optional boolean vector marking non-marine units (`true` skipped).
+- `resolution`: GMT/basemap coastline tier (`"h"` default).
+- `grid_minutes`: Raster spacing in arc-minutes (`1.25` default).
+
+Outputs:
+Integer count of coastal marine polygons whose vertex rings were modified.
+"""
+function clip_polygons_to_ocean!(
+    polygons_lonlat::AbstractVector,
+    centroids_lonlat::AbstractVector;
+    land_mask::Union{Nothing, AbstractVector{Bool}} = nothing,
+    resolution::AbstractString = "h",
+    grid_minutes::Real = 1.25
+)::Int
+    n = min(length(polygons_lonlat), length(centroids_lonlat))
+    lon, lat, data = _basemap_mask_data(resolution, grid_minutes)
+    lon0, dlon = first(lon), (last(lon) - first(lon)) / (length(lon) - 1)
+    lat0, dlat = first(lat), (last(lat) - first(lat)) / (length(lat) - 1)
+
+    n_clipped = 0
+    for u in 1:n
+        (land_mask !== nothing && u <= length(land_mask) && land_mask[u]) && continue
+        ring = polygons_lonlat[u]
+        length(ring) < 3 && continue
+        cx, cy = Float64(centroids_lonlat[u][1]), Float64(centroids_lonlat[u][2])
+        _is_raster_non_ocean(lon, lat, data, lon0, dlon, lat0, dlat, cx, cy) && continue
+        is_closed = ring[1] == ring[end]
+        n_v = length(ring) - (is_closed ? 1 : 0)
+        new_ring = Vector{Tuple{Float64, Float64}}(undef, length(ring))
+        changed = false
+
+        for k in 1:n_v
+            vx, vy = Float64(ring[k][1]), Float64(ring[k][2])
+            dx = vx - cx
+            dy = vy - cy
+            last_ocean_s = 0.0
+            hit_land = false
+            for s in 0.02:0.02:1.00
+                if _is_raster_non_ocean(lon, lat, data, lon0, dlon, lat0, dlat,
+                                        cx + s * dx, cy + s * dy)
+                    hit_land = true
+                    break
+                else
+                    last_ocean_s = s
+                end
+            end
+            if hit_land
+                s_safe = 0.92 * last_ocean_s
+                rx = round(cx + s_safe * dx; digits = 5)
+                ry = round(cy + s_safe * dy; digits = 5)
+                if _is_raster_non_ocean(lon, lat, data, lon0, dlon, lat0, dlat, rx, ry)
+                    rx = round(cx; digits = 5)
+                    ry = round(cy; digits = 5)
+                end
+                new_ring[k] = (rx, ry)
+                changed = true
+            else
+                new_ring[k] = (vx, vy)
+            end
+        end
+        if is_closed
+            new_ring[end] = new_ring[1]
+        end
+        if changed
+            polygons_lonlat[u] = new_ring
+            n_clipped += 1
+        end
+    end
+    return n_clipped
+end
+
+"""
+    mask_enclosed_inland_pockets!(land_mask, W; min_component_fraction=0.02, min_total_marine=200)
+
+Mark small disconnected or semi-enclosed inland water components (e.g., fjord-lakes or
+lagoons isolated after overland edge severing) as non-marine (`true`) in `land_mask`
+whenever their size falls below `max(15, round(Int, min_component_fraction * S_max))`,
+where `S_max` is the size of the largest connected marine component.
+
+Inputs:
+- `land_mask`: Length-`S` boolean mask (`true` = non-marine, mutated in place).
+- `W`: Symmetric `S x S` sparse marine adjacency matrix.
+- `min_component_fraction`: Minimum component size relative to `S_max` in `(0, 1)`.
+- `min_total_marine`: Minimum active marine count required before pocket pruning applies.
+
+Outputs:
+Integer count of units newly marked `true` in `land_mask`.
+"""
+function mask_enclosed_inland_pockets!(
+    land_mask::AbstractVector{Bool},
+    W::SparseMatrixCSC;
+    min_component_fraction::Float64 = 0.02,
+    min_total_marine::Int = 200
+)::Int
+    n = length(land_mask)
+    count(!, land_mask) < min_total_marine && return 0
+
+    rows = rowvals(W)
+    visited = falses(n)
+    comps = Vector{Vector{Int}}()
+    for i in 1:n
+        (land_mask[i] || visited[i]) && continue
+        comp = Int[]
+        visited[i] = true
+        q = Int[i]
+        head = 1
+        while head <= length(q)
+            u = q[head]
+            head += 1
+            push!(comp, u)
+            for ptr in nzrange(W, u)
+                v = rows[ptr]
+                (land_mask[v] || visited[v] || W[v, u] <= 0.0) && continue
+                visited[v] = true
+                push!(q, v)
+            end
+        end
+        push!(comps, comp)
+    end
+    isempty(comps) && return 0
+    max_sz = maximum(length, comps)
+    min_keep = max(15, round(Int, min_component_fraction * max_sz))
+    n_masked = 0
+    for c in comps
+        if length(c) < min_keep
+            for u in c
+                land_mask[u] = true
+                n_masked += 1
+            end
+        end
+    end
+    return n_masked
 end
 
 """
@@ -313,20 +581,7 @@ end
 Even-odd ray casting. `ring` is a closed or unclosed sequence of `(x, y)` vertices.
 """
 function point_in_ring(x::Real, y::Real, ring)::Bool
-    n = length(ring)
-    n < 3 && return false
-    inside = false
-    j = n
-    @inbounds for i in 1:n
-        xi, yi = Float64(ring[i][1]), Float64(ring[i][2])
-        xj, yj = Float64(ring[j][1]), Float64(ring[j][2])
-        if ((yi > y) != (yj > y))
-            xint = (xj - xi) * (y - yi) / (yj - yi) + xi
-            x < xint && (inside = !inside)
-        end
-        j = i
-    end
-    return inside
+    return Tethys.point_in_polygon(x, y, ring)
 end
 
 # =============================================================================
@@ -354,8 +609,8 @@ function read_polygon_file(path::AbstractString)::Vector{Vector{NTuple{2, Float6
     isfile(path) || throw(ArgumentError("Polygon file not found: $path"))
     ext = lowercase(splitext(path)[2])
 
-    if ext == ".csv"
-        return _rings_from_table(CSV.read(DataFrame, path))
+    if ext in (".csv", ".dat", ".txt")
+        return _rings_from_table(CSV.read(path, DataFrame))
     elseif ext == ".jld2"
         return _rings_from_object(JLD2.load(path), path)
     elseif ext in (".rds", ".rdata")
@@ -368,7 +623,7 @@ function read_polygon_file(path::AbstractString)::Vector{Vector{NTuple{2, Float6
 
     throw(ArgumentError(
         "Unsupported polygon file '$path'. Supported extensions: " *
-        ".csv, .jld2, .rds, .RData, .shp, .geojson, .json"
+        ".csv, .dat, .txt, .jld2, .rds, .RData, .shp, .geojson, .json"
     ))
 end
 

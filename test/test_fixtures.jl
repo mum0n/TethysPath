@@ -16,8 +16,7 @@ using JSON
 using UUIDs
 using LibGEOS
 
-const TEST_TMP = joinpath(pkgdir(TethysPath), "test_tmp")
-mkpath(TEST_TMP)
+const TEST_TMP = mktempdir(; prefix = "tethyspath_test_", cleanup = true)
 
 struct ParName
     s::String
