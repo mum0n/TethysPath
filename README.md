@@ -66,6 +66,8 @@ Instructions for loading Zarr checkpoints, inspecting posterior transition kerne
 ## GitHub serving:
 
 ```
+git push -u origin gh-pages
+
 git switch gh-pages
 Copy-Item ..\lakehouse\TethysPath\movement_dashboard.html .\index.html
 Copy-Item ..\lakehouse\TethysPath\movement_dashboard.data.zz .\movement_dashboard.data.zz
