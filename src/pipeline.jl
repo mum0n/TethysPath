@@ -3429,7 +3429,9 @@ function _encode_field_layer_json(
     scale_mode::Symbol = :linear,
     tracks_key::AbstractString = "none",
     highlight_mask = nothing,
-    highlight_label::AbstractString = "Critical Node"
+    highlight_label::AbstractString = "Critical Node",
+    description::AbstractString = "",
+    scale_hint::AbstractString = ""
 )::String
     m_vals = Float64[
         u <= length(field_vals) && isfinite(field_vals[u]) ? Float64(field_vals[u]) : 0.0
@@ -3485,6 +3487,9 @@ function _encode_field_layer_json(
         "\"tab\":\"$(_js_escape(tab_label))\"," *
         "\"title\":\"$(_js_escape(title))\"," *
         "\"label\":\"$(_js_escape(field_label))\"," *
+        "\"desc\":\"$(_js_escape(description))\"," *
+        "\"scale\":\"$(scale_mode === :sqrt_p99 ? "sqrt_p99" : "linear")\"," *
+        "\"scaleHint\":\"$(_js_escape(scale_hint))\"," *
         "\"vmin\":$(round(v_min; digits=4))," *
         "\"vmid\":$(round(v_mid_disp; digits=4))," *
         "\"vmax\":$(round(v_ref; digits=4))," *
@@ -3567,14 +3572,15 @@ function _ppc_inner_html(ppc::NamedTuple)::String
     <div class="grid">
       <div class="card">
         <h2>Posterior Predictive Summary ($(sm.n_observations) observations, $(sm.n_draws) draws)</h2>
+        <p class="card-desc">Measures how closely the fitted movement model reproduces observed recapture locations across the marine grid. Lower Kullback-Leibler (KL) divergence indicates closer agreement between simulated and observed recapture distributions.</p>
         <table>
           <tr><th>Metric</th><th>Mean</th><th>SD</th><th>95% Credible Interval</th></tr>
           <tr><td>KL Divergence (nats)</td><td>$(round(sm.kl_mean; digits=4))</td><td>$(round(sm.kl_sd; digits=4))</td><td>[$(round(sm.kl_lower_ci; digits=4)), $(round(sm.kl_upper_ci; digits=4))]</td></tr>
         </table>
       </div>
-      <div class="card"><h2>KL Divergence Trace</h2>$svg_k</div>
+      <div class="card"><h2>KL Divergence Trace</h2><p class="card-desc">Variation in model-data mismatch across posterior parameter draws; a narrow, stable trace indicates consistent predictive fit.</p>$svg_k</div>
     </div>
-    <div class="card" style="overflow-x:auto;"><h2>Observed vs Predicted Recapture Distribution</h2>$svg_d</div>
+    <div class="card" style="overflow-x:auto;"><h2>Observed vs Predicted Recapture Distribution</h2><p class="card-desc">Compares observed recapture counts (blue) with posterior-mean model predictions (red) across the 60 most frequently recaptured marine units; overlapping bars indicate well-calibrated spatial redistribution.</p>$svg_d</div>
     """
 end
 
@@ -3739,14 +3745,17 @@ function _path_analysis_inner_html(
 
     alpha_card = isempty(a_draws) ? "" :
         "<div class=\"card\"><h2>Posterior Advection (&alpha;) Draws</h2>" *
+        "<p class=\"card-desc\">Posterior distribution of the habitat-directed movement weight &alpha;; values near 1 indicate movement strongly follows habitat suitability gradients rather than pure random diffusion.</p>" *
         _svg_histogram(a_draws, "alpha", "#0891b2") * "</div>"
     pheno_card = isempty(pheno_rows) ? "" :
         "<div class=\"card\"><h2>Seasonal Movement Phenology (by Release Month)</h2>" *
+        "<p class=\"card-desc\">Observed straight-line displacement and depth change (&Delta;z, negative = shallower, positive = deeper) grouped by month of release to highlight seasonal migration timing.</p>" *
         "<table><tr><th>Month</th><th>Events</th><th>Mean Disp. (km)</th>" *
         "<th>Med. Disp. (km)</th><th>Mean &Delta;z (m)</th></tr>" *
         pheno_rows * "</table></div>"
     trait_card = isempty(trait_rows) ? "" :
         "<div class=\"card\"><h2>Trait-Movement OLS Associations (Predictor: $trait_lbl)</h2>" *
+        "<p class=\"card-desc\">Linear regressions testing whether individual body size ($trait_lbl) explains variation in displacement, path length, or speed; low R&sup2; and high p-values indicate weak size dependence.</p>" *
         "<table><tr><th>Response</th><th>n</th><th>Slope (&beta;&#8321;)</th>" *
         "<th>R&sup2;</th><th>p-value</th></tr>" *
         trait_rows * "</table></div>"
@@ -3772,6 +3781,7 @@ function _path_analysis_inner_html(
             end
             ds_card = "<div class=\"card\" style=\"margin-bottom:18px;overflow-x:auto;\">" *
                 "<h2>Acoustic Array (OTN) vs. Commercial Trap (BIO) Transition Kernel Inference</h2>" *
+                "<p class=\"card-desc\">Compares movement parameters estimated from fishery-independent acoustic receivers (OTN, fine-scale local residency) against commercial trap recaptures (BIO, broader shelf dispersal adjusted for fishing effort).</p>" *
                 "<table><tr><th>Data Source</th><th>Obs (Tags)</th><th>% Stat.</th>" *
                 "<th>Med / Mean Disp (km)</th><th>&alpha; [95% CI]</th><th>&rho; [95% CI]</th>" *
                 "<th>&gamma;</th><th>v<sub>eff</sub> (km/yr) / D<sub>eff</sub> (km&sup2;/yr)</th></tr>" *
@@ -3820,6 +3830,7 @@ function _path_analysis_inner_html(
         dlppd_s = isfinite(disp_diag.delta_lppd) ? string(round(disp_diag.delta_lppd; digits=1)) : "—"
         gain_s = isfinite(disp_diag.mean_ll_gain) ? string(round(disp_diag.mean_ll_gain; digits=4)) : "—"
         disp_card = "<div class=\"card\"><h2>Multi-Horizon Dispersal Scaling &amp; Null-Model Test</h2>" *
+                    "<p class=\"card-desc\">Checks how far crabs spread as time between mark and recapture increases. Exponent &beta; &lt; 1 indicates sub-diffusive (constrained) spread; positive &Delta;LPPD confirms the habitat-guided model outperforms a uniform random walk.</p>" *
                     "<p style=\"font-size:12.5px;margin:0 0 10px 0;\">" *
                     "<b>MSD exponent &beta;:</b> $beta_s &nbsp;|&nbsp; " *
                     "<b>&Delta;LPPD (fitted vs. isotropic null):</b> $dlppd_s ($gain_s / obs, n = $(disp_diag.n_obs))</p>" *
@@ -3846,6 +3857,7 @@ function _path_analysis_inner_html(
             end
         end
         bathy_card = "<div class=\"card\"><h2>Bathymetric &amp; Ontogenetic Migration (&Delta;z = z<sub>rec</sub> &minus; z<sub>rel</sub>)</h2>" *
+                     "<p class=\"card-desc\">Net change in seabed depth between mark and recapture by carapace width and shell condition; positive &Delta;z indicates movement into deeper water, negative into shallower water.</p>" *
                      "<p style=\"font-size:12.5px;margin:0 0 10px 0;\">" *
                      "<b>Overall mean &Delta;z:</b> $(round(bathy_mig.mean_dz_m; digits=2)) m " *
                      "(t = $(round(bathy_mig.t_stat; digits=2)), p = $(round(bathy_mig.p_val; digits=4))) &nbsp;|&nbsp; " *
@@ -3870,6 +3882,7 @@ function _path_analysis_inner_html(
                      "<td>$(round(r.mean_speed_yr; digits=1))</td></tr>"
         end
         bio_card = "<div class=\"card\"><h2>Biological-State Mobility Stratification (All Observations)</h2>" *
+                   "<p class=\"card-desc\">Observed movement distance, speed, and site fidelity (% recaptured in the same 5 km cell) broken down by shell hardness and carapace width.</p>" *
                    "<table><tr><th>Stratum</th><th>n</th><th>% Stationary</th><th>Med. Disp (km)</th>" *
                    "<th>Mean Disp (km)</th><th>Mean Speed (km/yr)</th></tr>$srows</table></div>"
     end
@@ -3890,6 +3903,7 @@ function _path_analysis_inner_html(
             crows *= "<tr><td><b>$(lbls[i])</b></td>$cells</tr>"
         end
         conn_card = "<div class=\"card\"><h2>1-Year HSI-Weighted Regional Transition Probabilities</h2>" *
+                    "<p class=\"card-desc\">Model-predicted probability that a crab starting in a row management area is located in a column area after one year (diagonal = annual self-retention; n = observed tag counts).</p>" *
                     "<table>$hdr$crows</table></div>"
     end
 
@@ -3910,6 +3924,7 @@ function _path_analysis_inner_html(
     <div class="grid">
       <div class="card">
         <h2>Fitted Transition Kernel Parameters (Pooled)</h2>
+        <p class="card-desc">Core daily movement parameters estimated across all tags: &alpha; is the weight on habitat-guided drift vs. random diffusion, &rho; is the daily probability of remaining in the same 5 km cell, and &gamma; controls how strongly crabs climb habitat gradients.</p>
         <table>
           <tr><th>Parameter</th><th>Posterior Mean</th><th>95% CI</th></tr>
           <tr><td>Advection weight (&alpha;)</td><td>$(round(Float64(mean(kernels.alpha_hat)); digits=4))</td><td>$(ci_txt(a_draws))</td></tr>
@@ -3919,6 +3934,7 @@ function _path_analysis_inner_html(
       </div>
       <div class="card">
         <h2>Markov-Bridge Trajectory Summary ($(length(paths_rich)) sampled tracks)</h2>
+        <p class="card-desc">Compares straight-line displacement between release and recapture against total reconstructed in-water path length and implied annual travel speed.</p>
         <table>
           <tr><th>Metric</th><th>Value</th></tr>
           <tr><td>Mean / Median net displacement (km)</td><td>$disp_summary</td></tr>
@@ -3930,9 +3946,9 @@ function _path_analysis_inner_html(
     $ds_card
     $taxis_card
     <div class="grid">
-      <div class="card"><h2>Net Displacement Distribution (km)</h2>$svg_disp</div>
-      <div class="card"><h2>Markov-Bridge Cumulative Length (km)</h2>$svg_plen</div>
-      <div class="card"><h2>Annual Movement Speed (km/yr)</h2>$svg_spd</div>
+      <div class="card"><h2>Net Displacement Distribution (km)</h2><p class="card-desc">Straight-line distance between mark and recapture across sampled tags (red dashed line = mean); most crabs are recaptured locally with a long tail of shelf-scale movers.</p>$svg_disp</div>
+      <div class="card"><h2>Markov-Bridge Cumulative Length (km)</h2><p class="card-desc">Total marine path length accumulated along sampled daily-step bridges; larger values than net displacement reflect meandering and back-and-forth foraging.</p>$svg_plen</div>
+      <div class="card"><h2>Annual Movement Speed (km/yr)</h2><p class="card-desc">Net displacement divided by elapsed time between mark and recapture; right-skewed tail reflects fast short-interval movers.</p>$svg_spd</div>
       $alpha_card
     </div>
     $extra_grid
@@ -4172,7 +4188,9 @@ function _export_consolidated_dashboard_html(
             "smoothed_all", "Smoothed Trajectories",
             "$(params.species_name) — Smoothed Predicted Trajectories ($(length(smooth_events)) Events by Time Between Mark and Recapture)",
             "Time Between Mark and Recapture", marine_indices, sm_bg;
-            cmap = :viridis, scale_mode = :linear, tracks_key = "smooth"
+            cmap = :viridis, scale_mode = :linear, tracks_key = "smooth",
+            description = "Smoothed in-water routes linking each crab's mark/release (green dot) to its recapture (gold star), colour-coded by elapsed time. Arrowheads show movement direction; click the map to highlight nearby trajectories.",
+            scale_hint = "Colours group events by elapsed time between mark and recapture."
         ))
     end
 
@@ -4181,7 +4199,9 @@ function _export_consolidated_dashboard_html(
         "paths", "Paths & HSI",
         "$(params.species_name) — Reconstructed Trajectories & Habitat Suitability",
         "Habitat Suitability (HSI)", marine_indices, hsi_field;
-        cmap = params.cmap, scale_mode = :linear, tracks_key = "recon"
+        cmap = params.cmap, scale_mode = :linear, tracks_key = "recon",
+        description = "Background shading shows Habitat Suitability Index (0 = poor, 1 = optimal; 0.50 baseline in unsurveyed zones). Overlaid lines show sampled in-water movement paths connecting mark (green) and recapture (star) sites.",
+        scale_hint = "0 = unsuitable habitat, 0.5 = neutral baseline, 1 = peak suitability."
     ))
 
     # Tab 2: Corridors
@@ -4223,7 +4243,9 @@ function _export_consolidated_dashboard_html(
         "$(params.species_name) — Cumulative Markov Bridge Transit Corridors",
         "Corridor Transit Density", marine_indices, corr_vec;
         cmap = :inferno, scale_mode = :sqrt_p99, tracks_key = "recon",
-        highlight_mask = corr_hi_mask, highlight_label = "Core Corridor"
+        highlight_mask = corr_hi_mask, highlight_label = "Core Corridor",
+        description = "Shows where tagged crab most likely passed in transit between release and recapture (endpoints excluded). Brighter cells mark heavier traffic and yellow dots flag the top 8% core corridors; intensity reflects both movement routes and tagging coverage.",
+        scale_hint = "Higher values = greater cumulative in-transit probability across sampled tags."
     ))
 
     # Tab 3: Directed Flux & Structural Bottlenecks
@@ -4234,7 +4256,9 @@ function _export_consolidated_dashboard_html(
             "$(params.species_name) — Net Directed Migration Flux & Structural Bottlenecks B(u)",
             "Bottleneck Index B(u)", marine_indices, db.bottleneck_score;
             cmap = :plasma, scale_mode = :sqrt_p99, tracks_key = "flux",
-            highlight_mask = db.bottleneck_mask, highlight_label = "Bottleneck"
+            highlight_mask = db.bottleneck_mask, highlight_label = "Bottleneck",
+            description = "Highlights narrow chokepoints where crab transit concentrates through few open marine neighbours (bright cells and yellow dots). Blue arrows show net dominant movement direction and strength.",
+            scale_hint = "Higher B(u) = heavier transit squeezed through fewer marine connections."
         ))
     end
 
@@ -4247,7 +4271,9 @@ function _export_consolidated_dashboard_html(
             "$(params.species_name) — Spatial Corridor Canalization Index K(u) & Conduits",
             "Canalization Index K(u)", marine_indices, cc.canalization_index;
             cmap = :inferno, scale_mode = :sqrt_p99, tracks_key = "none",
-            highlight_mask = cc.conduit_mask, highlight_label = "Conduit"
+            highlight_mask = cc.conduit_mask, highlight_label = "Conduit",
+            description = "Separates narrow, habitat-guided movement conduits (bright values and yellow dots) from broad, undirected spreading (dark values) by combining transit volume with directional focus.",
+            scale_hint = "0 = broad diffuse spread; 1 = tightly focused high-traffic conduit."
         ))
     end
     if eff_dispersal !== nothing && hasproperty(eff_dispersal, :effective_area_km2) &&
@@ -4256,7 +4282,9 @@ function _export_consolidated_dashboard_html(
             "effective_dispersal", "1-Yr Effective Dispersal",
             "$(params.species_name) — 1-Year Effective Dispersal Area A_eff(u) = exp(H(P^$(eff_dispersal.horizon_steps))) * A_cell",
             "1-Yr Effective Dispersal Area (km²)", marine_indices, eff_dispersal.effective_area_km2;
-            cmap = :viridis, scale_mode = :linear, tracks_key = "none"
+            cmap = :viridis, scale_mode = :linear, tracks_key = "none",
+            description = "Estimates the effective ocean area (km²) that crabs starting in each cell spread across over one year. Lower values (dark) indicate stronger local retention; higher values (yellow) indicate broader open-shelf mixing.",
+            scale_hint = "Effective 1-year spread footprint in km² (smaller = tighter retention)."
         ))
     end
     if spatial_roses !== nothing && hasproperty(spatial_roses, :cells) && !isempty(spatial_roses.cells)
@@ -4268,7 +4296,9 @@ function _export_consolidated_dashboard_html(
             "bearing_roses", "Compass Bearing Roses (100 km)",
             "$(params.species_name) — Spatially Discretized 100 x 100 km Compass Bearing Roses & Rayleigh Tests",
             rose_bg_lbl, marine_indices, rose_bg;
-            cmap = :viridis, scale_mode = :linear, tracks_key = "roses"
+            cmap = :viridis, scale_mode = :linear, tracks_key = "roses",
+            description = "Each compass rose summarizes observed movement directions within a 100 km block. Blue petals indicate statistically consistent directional travel (Rayleigh p < 0.05), grey indicates no preferred direction, and the red needle marks mean bearing.",
+            scale_hint = "Background shading shows local seabed depth (or HSI)."
         ))
     end
 
@@ -4281,7 +4311,9 @@ function _export_consolidated_dashboard_html(
             "$(params.species_name) — Electrical Circuit Current Density & Pinch-Points",
             "Current Density", marine_indices, circ.current_density;
             cmap = :plasma, scale_mode = :sqrt_p99, tracks_key = "none",
-            highlight_mask = pmask, highlight_label = "Pinch-Point"
+            highlight_mask = pmask, highlight_label = "Pinch-Point",
+            description = "Models the ocean as an electrical resistor network where easier movement equals higher conductance. Bright areas carry the strongest multi-route connectivity flow, and yellow dots mark critical pinch-points.",
+            scale_hint = "Higher current = stronger domain-wide connectivity flow through this cell."
         ))
     end
 
@@ -4291,7 +4323,9 @@ function _export_consolidated_dashboard_html(
             "agents", "Agent Space-Use",
             "$(params.species_name) — Forward-Projected Agent Visitation Probability",
             "Visit Probability", marine_indices, agent_space_use.visit_probability;
-            cmap = :viridis, scale_mode = :sqrt_p99, tracks_key = "agent"
+            cmap = :viridis, scale_mode = :sqrt_p99, tracks_key = "agent",
+            description = "Shows where simulated crabs accumulate when released and stepped forward freely under the fitted movement model (without conditioning on recapture locations), revealing natural aggregation zones.",
+            scale_hint = "Higher values = greater simulated visitation probability."
         ))
     end
 
@@ -4305,7 +4339,9 @@ function _export_consolidated_dashboard_html(
         "tessellation", "Tessellation & Depth",
         "$(params.species_name) — Spatial Hexagonal Tessellation ($(length(marine_indices)) Marine Units)",
         depth_label, marine_indices, depth_field;
-        cmap = :viridis, scale_mode = :linear, tracks_key = "none"
+        cmap = :viridis, scale_mode = :linear, tracks_key = "none",
+        description = "Displays the 5 km marine hexagonal mesh used by the movement model, clipped to the coastline and coloured by seabed depth (metres) to show the underwater terrain.",
+        scale_hint = "Seabed depth in metres across each marine hexagonal cell."
     ))
 
     recon_tracks_js = _serialize_tracks_json(paths_rich)
@@ -4384,6 +4420,7 @@ function _export_consolidated_dashboard_html(
       h2 { font-size: 15.5px; margin: 0 0 12px 0; border-bottom: 1px solid $bdr; padding-bottom: 6px; }
       .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 16px; margin-bottom: 18px; }
       .card { background: $card; border: 1px solid $bdr; border-radius: 10px; padding: 16px; }
+      .card-desc { font-size: 12px; color: $muted; line-height: 1.42; margin: -6px 0 10px 0; }
       table { width: 100%; border-collapse: collapse; font-size: 13px; }
       th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid $bdr; }
       th { color: $muted; font-weight: 600; }
@@ -4394,9 +4431,18 @@ function _export_consolidated_dashboard_html(
                     box-shadow: 0 2px 10px rgba(0,0,0,0.2); border: 1px solid $bdr; }
       .info-panel h3 { margin: 0 0 4px 0; font-size: 13.5px; line-height: 1.3; }
       .info-panel .sub { font-size: 11.5px; color: $muted; line-height: 1.35; }
+      .info-panel .desc { font-size: 11.5px; color: $fg; line-height: 1.42; margin-top: 7px;
+                          padding-top: 7px; border-top: 1px solid $bdr; }
       .legend-box { background: $panel_bg; color: $fg; padding: 10px 13px; border-radius: 8px;
                     box-shadow: 0 2px 10px rgba(0,0,0,0.2); font-size: 12px; border: 1px solid $bdr; }
-      .grad-bar { height: 12px; width: 100%; border-radius: 3px; margin: 6px 0 4px 0; }
+      #legend-grad-wrap { position: relative; }
+      .grad-bar { height: 12px; width: 100%; border-radius: 3px; margin: 6px 0 4px 0; cursor: crosshair; }
+      .scale-tooltip { display: none; position: absolute; left: 0; right: 0; bottom: calc(100% + 6px);
+                       background: #0f172a; color: #f8fafc; padding: 6px 8px; border-radius: 6px;
+                       font-size: 11px; line-height: 1.35; box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+                       pointer-events: none; z-index: 1200; }
+      .tess-toggle-row { display: flex; align-items: center; gap: 6px; margin-top: 8px;
+                         padding-top: 7px; border-top: 1px solid $bdr; font-size: 11.5px; cursor: pointer; }
       .grad-labels { display: flex; justify-content: space-between; font-family: monospace; font-size: 11px; }
       .swatch-list { display: none; flex-direction: column; gap: 4px; margin-top: 6px; font-size: 11.5px; }
       .swatch-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
@@ -4450,10 +4496,12 @@ function _export_consolidated_dashboard_html(
           <div class="info-panel">
             <h3 id="map-title">Loading...</h3>
             <div class="sub" id="map-subtitle"></div>
+            <div class="desc" id="map-desc" style="display:none;"></div>
           </div>
           <div class="legend-box">
             <div id="legend-label" style="font-weight:600;">Value</div>
             <div id="legend-grad-wrap">
+              <div id="legend-scale-tip" class="scale-tooltip"></div>
               <div id="legend-bar" class="grad-bar"></div>
               <div class="grad-labels">
                 <span id="legend-min">0</span>
@@ -4477,6 +4525,10 @@ function _export_consolidated_dashboard_html(
                 <span>Direction of Movement (arrowhead)</span>
               </div>
             </div>
+            <label class="tess-toggle-row" title="Toggle the 5 km marine hexagonal tessellation overlay on or off in this panel">
+              <input type="checkbox" id="toggle-tessellation-chk" checked/>
+              <span>Show background tessellation</span>
+            </label>
           </div>
           <div id="smooth-controls-dock" class="smooth-dock">
             <h4>Trajectory Controls &amp; Selection</h4>
@@ -5046,6 +5098,62 @@ function _export_consolidated_dashboard_html(
         map.fitBounds(boundsPts, {paddingTopLeft: [314, 24], paddingBottomRight: [24, 24]});
       }
 
+      const tessVisibleByTab = {};
+      const tessChk = document.getElementById('toggle-tessellation-chk');
+      const legendBar = document.getElementById('legend-bar');
+      const legendTip = document.getElementById('legend-scale-tip');
+
+      function setTessellationVisibility(visible) {
+        if (visible) {
+          if (!map.hasLayer(fieldLayer)) map.addLayer(fieldLayer);
+        } else {
+          if (map.hasLayer(fieldLayer)) map.removeLayer(fieldLayer);
+        }
+        if (tessChk) tessChk.checked = visible;
+      }
+
+      if (tessChk) {
+        tessChk.addEventListener('change', function(ev) {
+          const on = !!ev.target.checked;
+          if (activeLayerCfg) tessVisibleByTab[activeLayerCfg.id] = on;
+          setTessellationVisibility(on);
+        });
+      }
+      map.on('overlayadd', function(ev) {
+        if (ev.layer === fieldLayer) {
+          if (activeLayerCfg) tessVisibleByTab[activeLayerCfg.id] = true;
+          if (tessChk) tessChk.checked = true;
+        }
+      });
+      map.on('overlayremove', function(ev) {
+        if (ev.layer === fieldLayer) {
+          if (activeLayerCfg) tessVisibleByTab[activeLayerCfg.id] = false;
+          if (tessChk) tessChk.checked = false;
+        }
+      });
+
+      if (legendBar && legendTip) {
+        legendBar.addEventListener('mousemove', function(ev) {
+          if (!activeLayerCfg || activeLayerCfg.tracks === 'smooth') return;
+          const rect = legendBar.getBoundingClientRect();
+          if (rect.width <= 0) return;
+          const u = Math.max(0.0, Math.min(1.0, (ev.clientX - rect.left) / rect.width));
+          const vmin = Number(activeLayerCfg.vmin) || 0.0;
+          const vmax = Number(activeLayerCfg.vmax) || 1.0;
+          const isSqrt = activeLayerCfg.scale === 'sqrt_p99';
+          const val = isSqrt ? (vmin + u * u * (vmax - vmin)) : (vmin + u * (vmax - vmin));
+          const av = Math.abs(val);
+          const fmtVal = av >= 100 ? val.toFixed(1) : (av >= 1 ? val.toFixed(2) : val.toFixed(4));
+          const modeTxt = isSqrt ? 'Square-root scale (capped at 99th pct)' : 'Linear scale';
+          const hintTxt = activeLayerCfg.scaleHint ? ('<br>' + activeLayerCfg.scaleHint) : '';
+          legendTip.innerHTML = '<b>' + activeLayerCfg.label + ': ' + fmtVal + '</b><br>' + modeTxt + hintTxt;
+          legendTip.style.display = 'block';
+        });
+        legendBar.addEventListener('mouseleave', function() {
+          legendTip.style.display = 'none';
+        });
+      }
+
       function applyMapLayer(cfg) {
         activeLayerCfg = cfg;
         document.getElementById('map-title').textContent = cfg.title;
@@ -5059,14 +5167,29 @@ function _export_consolidated_dashboard_html(
         if (cfg.hi.length > 0) sub += ' · ' + cfg.hiLabel + 's: ' + cfg.hi.length;
         document.getElementById('map-subtitle').textContent = sub;
 
+        const descEl = document.getElementById('map-desc');
+        if (descEl) {
+          if (cfg.desc && cfg.desc.length > 0) {
+            descEl.textContent = cfg.desc;
+            descEl.style.display = 'block';
+          } else {
+            descEl.textContent = '';
+            descEl.style.display = 'none';
+          }
+        }
+
         document.getElementById('legend-label').textContent = cfg.label;
+        const gradWrap = document.getElementById('legend-grad-wrap');
         if (cfg.tracks === 'smooth') {
-          document.getElementById('legend-grad-wrap').style.display = 'none';
+          gradWrap.style.display = 'none';
+          if (legendTip) legendTip.style.display = 'none';
           document.getElementById('legend-swatches').style.display = 'flex';
           document.getElementById('legend-symbols').style.display = 'flex';
           document.getElementById('smooth-controls-dock').style.display = 'block';
         } else {
-          document.getElementById('legend-grad-wrap').style.display = 'block';
+          gradWrap.style.display = 'block';
+          const scaleDesc = cfg.scale === 'sqrt_p99' ? 'Square-root scale (capped at 99th pct)' : 'Linear scale';
+          gradWrap.title = cfg.label + ' — ' + scaleDesc + (cfg.scaleHint ? ('. ' + cfg.scaleHint) : '');
           document.getElementById('legend-swatches').style.display = 'none';
           document.getElementById('legend-symbols').style.display = 'none';
           document.getElementById('smooth-controls-dock').style.display = 'none';
@@ -5078,8 +5201,15 @@ function _export_consolidated_dashboard_html(
 
         for (let i = 0; i < cellShapes.length; i++) {
           const col = cfg.k[i] || '#3b82f6';
-          const fop = (cfg.o && cfg.o[i] !== undefined) ? cfg.o[i] : 0.60;
-          const sop = fop < 0.12 ? 0.12 : 0.42;
+          let fop = (cfg.o && cfg.o[i] !== undefined) ? cfg.o[i] : 0.60;
+          let sop = fop < 0.12 ? 0.12 : 0.42;
+          if (cfg.tracks === 'smooth') {
+            fop = 0.28;
+            sop = 0.20;
+          } else if (cfg.tracks === 'roses') {
+            fop = 0.25;
+            sop = 0.18;
+          }
           const val = cfg.v[i];
           cellShapes[i].setStyle({color: col, fillColor: col, fillOpacity: fop, opacity: sop});
           cellShapes[i].unbindTooltip();
@@ -5087,6 +5217,10 @@ function _export_consolidated_dashboard_html(
             cellShapes[i].bindTooltip('Unit ' + SHARED_CELLS[i].u + ' · ' + cfg.label + ': ' + val);
           }
         }
+
+        const defaultTess = (cfg.tracks !== 'smooth');
+        const showTess = (tessVisibleByTab[cfg.id] !== undefined) ? tessVisibleByTab[cfg.id] : defaultTess;
+        setTessellationVisibility(showTess);
 
         trackLayer.clearLayers();
         fluxLayer.clearLayers();
@@ -5096,9 +5230,6 @@ function _export_consolidated_dashboard_html(
         smoothHiLayer.clearLayers();
         smoothPinLayer.clearLayers();
         if (cfg.tracks === 'smooth') {
-          for (let i = 0; i < cellShapes.length; i++) {
-            cellShapes[i].setStyle({fillOpacity: 0.0, opacity: 0.0});
-          }
           ensureSmoothPolylines();
           for (let k = 0; k < SMOOTH_EVENTS.length; k++) {
             smoothBgLayer.addLayer(smoothPolylines[k]);
@@ -5123,9 +5254,6 @@ function _export_consolidated_dashboard_html(
             }).bindTooltip(f.p).addTo(fluxLayer);
           });
         } else if (cfg.tracks === 'roses') {
-          for (let i = 0; i < cellShapes.length; i++) {
-            cellShapes[i].setStyle({fillOpacity: 0.25, opacity: 0.18});
-          }
           MAP_ROSES.forEach(function(r) {
             const icon = L.divIcon({
               html: r.svg,
