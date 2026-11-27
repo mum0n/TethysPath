@@ -3229,7 +3229,8 @@ Phase 5 of the pipeline. Optionally computes:
 `NamedTuple` with `circuit` (or `nothing` if not computed).
 """
 function compute_advanced_diagnostics(
-    loaded, path_results, params
+    loaded, path_results, params;
+    kernels = nothing
 )::NamedTuple
     verbose   = params.verbose
     W         = loaded.W
@@ -3240,6 +3241,38 @@ function compute_advanced_diagnostics(
     sources_v = Int.(obs_df.release)
     sinks_v   = Int.(obs_df.recapture)
     hsi_se_v  = fill(params.hsi_se, n_spatial)
+
+    # Group non-stationary marine observations into unique (release, recapture)
+    # pairs with log-damped weights 1 + log(count) so a single heavily fished
+    # port does not swamp shelf-wide circuit corridors.
+    pair_counts = Dict{Tuple{Int, Int}, Int}()
+    for (u_rel, u_rec) in zip(sources_v, sinks_v)
+        u_rel == u_rec && continue
+        if 1 <= u_rel <= n_spatial && 1 <= u_rec <= n_spatial &&
+           (land_mask === nothing || (!land_mask[u_rel] && !land_mask[u_rec]))
+            pair_counts[(u_rel, u_rec)] = get(pair_counts, (u_rel, u_rec), 0) + 1
+        end
+    end
+    if !isempty(pair_counts)
+        u_pairs = sort!(collect(keys(pair_counts)))
+        pair_srcs = Int[p[1] for p in u_pairs]
+        pair_snks = Int[p[2] for p in u_pairs]
+        pair_wts  = Float64[1.0 + log(Float64(pair_counts[p])) for p in u_pairs]
+    else
+        pair_srcs = sources_v
+        pair_snks = sinks_v
+        pair_wts  = nothing
+    end
+
+    # Calibrate conductance exponent to the MCMC-fitted habitat gradient gamma
+    # so edge conductance reflects inferred habitat selectivity rather than a
+    # nearly isotropic sheet.
+    cond_pow = if kernels !== nothing && hasproperty(kernels, :gamma_hat) &&
+                  kernels.gamma_hat !== nothing
+        clamp(Float64(mean(kernels.gamma_hat)), 1.0, 6.0)
+    else
+        3.5
+    end
 
     circuit_res::Union{NamedTuple, Nothing} = nothing
 
@@ -3284,20 +3317,23 @@ function compute_advanced_diagnostics(
             end
 
             cur_dens, _, _, _ = current_density_map(
-                W, sources_v, sinks_v;
-                hsi       = hsi_circuit,
-                land_mask = land_mask
+                W, pair_srcs, pair_snks;
+                weights           = pair_wts,
+                hsi               = hsi_circuit,
+                conductance_power = cond_pow,
+                land_mask         = land_mask,
+                include_endpoints = false
             )
             p_mask, p_score, p_thresh = identify_ecological_pinchpoints(
-                cur_dens; top_quantile = 0.90
+                cur_dens; top_quantile = 0.95
             )
             verbose && println(
-                "  Current density range: " *
-                "[$(round(minimum(cur_dens); digits=4)), " *
-                "$(round(maximum(cur_dens); digits=4))]"
+                "  Current density (interior, gamma=$(round(cond_pow; digits=2))) range: " *
+                "[$(round(minimum(cur_dens); digits=5)), " *
+                "$(round(maximum(cur_dens); digits=5))]"
             )
             verbose && println(
-                "  Critical pinch-points (top 10%): " *
+                "  Critical pinch-points (top 5%): " *
                 "$(sum(p_mask)) / $n_spatial"
             )
 
@@ -3322,21 +3358,27 @@ function compute_advanced_diagnostics(
 
             stoch_circuit = if annual_hsi_samples !== nothing
                 posterior_circuit_inference(
-                    W, sources_v, sinks_v;
-                    hsi_samples  = annual_hsi_samples,
-                    land_mask    = land_mask,
-                    top_quantile = 0.90,
-                    seed         = params.seed
+                    W, pair_srcs, pair_snks;
+                    weights           = pair_wts,
+                    hsi_samples       = annual_hsi_samples,
+                    conductance_power = cond_pow,
+                    land_mask         = land_mask,
+                    include_endpoints = false,
+                    top_quantile      = 0.95,
+                    seed              = params.seed
                 )
             else
                 posterior_circuit_inference(
-                    W, sources_v, sinks_v;
-                    hsi_mean     = hsi_circuit,
-                    hsi_se       = hsi_se_v,
-                    n_draws      = min(params.n_stochastic_draws, 12),
-                    land_mask    = land_mask,
-                    top_quantile = 0.90,
-                    seed         = params.seed
+                    W, pair_srcs, pair_snks;
+                    weights           = pair_wts,
+                    hsi_mean          = hsi_circuit,
+                    hsi_se            = hsi_se_v,
+                    n_draws           = min(params.n_stochastic_draws, 12),
+                    conductance_power = cond_pow,
+                    land_mask         = land_mask,
+                    include_endpoints = false,
+                    top_quantile      = 0.95,
+                    seed              = params.seed
                 )
             end
             robust_mask, _, n_robust = identify_stochastic_pinchpoints(
@@ -3347,13 +3389,15 @@ function compute_advanced_diagnostics(
             )
 
             circuit_res = (
-                current_density = cur_dens,
-                pinch_mask      = p_mask,
-                pinch_score     = p_score,
-                threshold       = p_thresh,
-                stochastic      = stoch_circuit,
-                robust_mask     = robust_mask,
-                n_robust        = n_robust,
+                current_density   = cur_dens,
+                pinch_mask        = p_mask,
+                pinch_score       = p_score,
+                threshold         = p_thresh,
+                stochastic        = stoch_circuit,
+                robust_mask       = robust_mask,
+                n_robust          = n_robust,
+                interior_only     = true,
+                conductance_power = cond_pow,
             )
         catch e
             _record_panel_skip("Circuit computation", e);             verbose && println("  (Circuit computation note: $(_error_note(e)))")
@@ -3441,17 +3485,32 @@ function _encode_field_layer_json(
     v_max = isempty(m_vals) ? 1.0 : maximum(m_vals)
 
     pos_vals = filter(>(1e-12), m_vals)
-    v_ref = if scale_mode === :sqrt_p99 && !isempty(pos_vals)
+    v_ref = if (scale_mode === :sqrt_p99 || scale_mode === :log_p99) && !isempty(pos_vals)
         max(quantile(pos_vals, 0.99), v_min + 1e-9)
     else
         max(v_max, v_min + 1e-9)
     end
     span_ref = max(v_ref - v_min, 1e-9)
+    v_scale = if scale_mode === :log_p99 && !isempty(pos_vals)
+        max(median(pos_vals) - v_min, span_ref * 1e-3, 1e-9)
+    else
+        1.0
+    end
+    log_denom = scale_mode === :log_p99 ? max(log1p(span_ref / v_scale), 1e-9) : 1.0
 
     cols_vec = Vector{String}(undef, length(m_vals))
     ops_vec  = Vector{String}(undef, length(m_vals))
     for (idx, v) in enumerate(m_vals)
-        if scale_mode === :sqrt_p99
+        if scale_mode === :log_p99
+            if v <= 1e-12
+                cols_vec[idx] = "\"" * _ramp_hex_color(0.0, cmap) * "\""
+                ops_vec[idx]  = "0.06"
+            else
+                u_norm = clamp(log1p(max(0.0, v - v_min) / v_scale) / log_denom, 0.0, 1.0)
+                cols_vec[idx] = "\"" * _ramp_hex_color(u_norm, cmap) * "\""
+                ops_vec[idx]  = string(round(0.24 + 0.62 * u_norm; digits = 2))
+            end
+        elseif scale_mode === :sqrt_p99
             if v <= 1e-9
                 cols_vec[idx] = "\"" * _ramp_hex_color(0.0, cmap) * "\""
                 ops_vec[idx]  = "0.06"
@@ -3468,7 +3527,7 @@ function _encode_field_layer_json(
     end
     cols_str = join(cols_vec, ",")
     ops_str  = join(ops_vec, ",")
-    vals_str = join([string(round(v; digits = 4)) for v in m_vals], ",")
+    vals_str = join([string(round(v; digits = 5)) for v in m_vals], ",")
 
     hi_idx = Int[]
     if highlight_mask !== nothing
@@ -3480,7 +3539,15 @@ function _encode_field_layer_json(
     end
     hi_str = join(string.(hi_idx), ",")
     grad_stops = join(["$(_ramp_hex_color(s, cmap)) $(round(Int, s * 100))%" for s in 0.0:0.2:1.0], ", ")
-    v_mid_disp = scale_mode === :sqrt_p99 ? v_min + 0.25 * span_ref : 0.5 * (v_min + v_ref)
+    v_mid_disp = if scale_mode === :log_p99
+        v_min + v_scale * expm1(0.5 * log_denom)
+    elseif scale_mode === :sqrt_p99
+        v_min + 0.25 * span_ref
+    else
+        0.5 * (v_min + v_ref)
+    end
+    scale_str = scale_mode === :log_p99 ? "log_p99" :
+                (scale_mode === :sqrt_p99 ? "sqrt_p99" : "linear")
 
     return "{" *
         "\"id\":\"$(_js_escape(id))\"," *
@@ -3488,7 +3555,8 @@ function _encode_field_layer_json(
         "\"title\":\"$(_js_escape(title))\"," *
         "\"label\":\"$(_js_escape(field_label))\"," *
         "\"desc\":\"$(_js_escape(description))\"," *
-        "\"scale\":\"$(scale_mode === :sqrt_p99 ? "sqrt_p99" : "linear")\"," *
+        "\"scale\":\"$scale_str\"," *
+        "\"vscale\":$(round(v_scale; sigdigits=5))," *
         "\"scaleHint\":\"$(_js_escape(scale_hint))\"," *
         "\"vmin\":$(round(v_min; digits=4))," *
         "\"vmid\":$(round(v_mid_disp; digits=4))," *
@@ -3590,11 +3658,25 @@ function _svg_histogram(
     color::AbstractString = "#3b82f6";
     nbins::Int = 20,
     width::Int = 360,
-    height::Int = 190
+    height::Int = 190,
+    clip_quantile::Union{Nothing, Float64} = nothing
 )::String
     v = Float64[Float64(x) for x in vals if isfinite(x)]
     isempty(v) && return "<p style='color:#64748b;font-size:12px;'>No finite data</p>"
-    vmin, vmax = minimum(v), maximum(v)
+    vmin = minimum(v)
+    vmax_raw = maximum(v)
+    n_tail = 0
+    vmax = if clip_quantile !== nothing && 0.5 < clip_quantile < 1.0 && length(v) >= 10
+        q_hi = quantile(v, clip_quantile)
+        if q_hi > vmin + 1e-12 && vmax_raw > q_hi * 1.25
+            n_tail = count(>(q_hi), v)
+            q_hi
+        else
+            vmax_raw
+        end
+    else
+        vmax_raw
+    end
     if vmax - vmin < 1e-12
         vmin -= 0.5
         vmax += 0.5
@@ -3602,6 +3684,7 @@ function _svg_histogram(
     edges = collect(range(vmin, vmax; length = nbins + 1))
     counts = zeros(Int, nbins)
     for x in v
+        x > vmax && continue
         b = clamp(searchsortedlast(edges, x), 1, nbins)
         counts[b] += 1
     end
@@ -3622,17 +3705,19 @@ function _svg_histogram(
                   "width=\"$(round(max(1.0, bw - 1.6); digits=1))\" height=\"$(round(bh; digits=1))\" " *
                   "fill=\"$color\" fill-opacity=\"0.82\" rx=\"1.5\"/>")
     end
-    # Mean vertical line
+    # Mean vertical line (clamped to display window when tail-clipped)
     mu = mean(v)
-    mx = pad_l + ((mu - vmin) / (vmax - vmin)) * pw
+    mx = pad_l + clamp((mu - vmin) / (vmax - vmin), 0.0, 1.0) * pw
     write(io, "<line x1=\"$(round(mx; digits=1))\" y1=\"$pad_t\" x2=\"$(round(mx; digits=1))\" y2=\"$y_ax\" " *
               "stroke=\"#ef4444\" stroke-width=\"1.6\" stroke-dasharray=\"4,3\"/>")
     write(io, "<line x1=\"$pad_l\" y1=\"$y_ax\" x2=\"$(width - pad_r)\" y2=\"$y_ax\" stroke=\"#64748b\" stroke-width=\"1\"/>")
     write(io, "<line x1=\"$pad_l\" y1=\"$pad_t\" x2=\"$pad_l\" y2=\"$y_ax\" stroke=\"#64748b\" stroke-width=\"1\"/>")
     write(io, "<text x=\"$pad_l\" y=\"$(y_ax + 13)\" fill=\"#64748b\" font-size=\"10\" font-family=\"monospace\">$(round(vmin; digits=2))</text>")
-    write(io, "<text x=\"$(width - pad_r)\" y=\"$(y_ax + 13)\" text-anchor=\"end\" fill=\"#64748b\" font-size=\"10\" font-family=\"monospace\">$(round(vmax; digits=2))</text>")
+    vmax_lbl = n_tail > 0 ? "$(round(vmax; digits=1))+" : "$(round(vmax; digits=2))"
+    write(io, "<text x=\"$(width - pad_r)\" y=\"$(y_ax + 13)\" text-anchor=\"end\" fill=\"#64748b\" font-size=\"10\" font-family=\"monospace\">$vmax_lbl</text>")
     write(io, "<text x=\"$(pad_l - 4)\" y=\"$(pad_t + 8)\" text-anchor=\"end\" fill=\"#64748b\" font-size=\"10\" font-family=\"monospace\">$cmax</text>")
-    write(io, "<text x=\"$(pad_l + pw ÷ 2)\" y=\"$(height - 5)\" text-anchor=\"middle\" fill=\"#475569\" font-size=\"11\">$xlabel (mean=$(round(mu; digits=2)))</text>")
+    tail_note = n_tail > 0 ? ", $n_tail > $(round(vmax; digits=0))" : ""
+    write(io, "<text x=\"$(pad_l + pw ÷ 2)\" y=\"$(height - 5)\" text-anchor=\"middle\" fill=\"#475569\" font-size=\"11\">$xlabel (mean=$(round(mu; digits=2))$tail_note)</text>")
     write(io, "</svg>")
     return String(take!(io))
 end
@@ -3792,29 +3877,43 @@ function _path_analysis_inner_html(
     # Compass bearing roses are placed at their geographic coordinates on the map
     # rather than rendered as a tabular grid inside the report pane.
 
-    # Bathymetric, thermal, & habitat gradient taxis vector projections
+    # Bathymetric, thermal (when available), & habitat gradient taxis vector projections
     taxis_card = ""
     if taxis_proj !== nothing && hasproperty(taxis_proj, :n_obs) && taxis_proj.n_obs > 0
+        t_parts = (taxis_proj.overall, taxis_proj.by_season, taxis_proj.by_cw)
+        has_thermal = any(
+            df_p -> nrow(df_p) > 0 && hasproperty(df_p, :mean_warmward_cos) &&
+                    any(x -> isfinite(Float64(x)), df_p.mean_warmward_cos),
+            t_parts
+        )
         trows = ""
-        for df_part in (taxis_proj.overall, taxis_proj.by_season, taxis_proj.by_cw)
+        for df_part in t_parts
             nrow(df_part) == 0 && continue
             for r in eachrow(df_part)
                 fmt_num(x, d=3) = isfinite(Float64(x)) ? string(round(Float64(x); digits=d)) : "—"
+                therm_cells = has_thermal ?
+                    "<td>$(fmt_num(r.mean_warmward_cos, 3)) (p=$(fmt_num(r.thermal_p, 3)))</td>" *
+                    "<td>$(fmt_num(r.mean_delta_T_C, 2))</td>" : ""
                 trows *= "<tr><td>$(_html_escape(string(r.stratum)))</td><td>$(r.n_bathy)</td>" *
                     "<td>$(fmt_num(r.mean_downslope_cos, 3)) (p=$(fmt_num(r.bathy_p, 3)))</td>" *
                     "<td>$(fmt_num(r.mean_downslope_km, 2))</td>" *
                     "<td>$(isfinite(Float64(r.along_isobath_frac)) ? string(round(100*Float64(r.along_isobath_frac); digits=1)) * "%" : "—")</td>" *
-                    "<td>$(fmt_num(r.mean_warmward_cos, 3)) (p=$(fmt_num(r.thermal_p, 3)))</td>" *
-                    "<td>$(fmt_num(r.mean_delta_T_C, 2))</td>" *
-                    "<td>$(fmt_num(r.mean_hsi_upgrad_cos, 3))</td></tr>"
+                    "$therm_cells<td>$(fmt_num(r.mean_hsi_upgrad_cos, 3))</td></tr>"
             end
         end
+        t_title = has_thermal ?
+            "Bathymetric (&nabla;z), Thermal (&nabla;T), &amp; Habitat (&nabla;HSI) Taxis Vector Projections" :
+            "Bathymetric (&nabla;z) &amp; Habitat (&nabla;HSI) Taxis Vector Projections"
+        t_desc = has_thermal ?
+            "Positive cosines denote net movement downslope (deeper), warmward (higher bottom T), and up-HSI gradient; along-isobath % measures contour-following perpendicular to &nabla;z." :
+            "Positive cosines denote net movement downslope (deeper) and toward higher Habitat Suitability (up-&nabla;HSI); along-isobath % measures contour-following perpendicular to seabed slope."
+        therm_hdr = has_thermal ? "<th>Warmward cos&psi;<sub>T</sub></th><th>Mean &Delta;T (&deg;C)</th>" : ""
         taxis_card = "<div class=\"card\" style=\"margin-bottom:18px;overflow-x:auto;\">" *
-            "<h2>Bathymetric (&nabla;z), Thermal (&nabla;T), &amp; Habitat (&nabla;HSI) Taxis Vector Projections</h2>" *
-            "<p style=\"font-size:12px;margin:0 0 8px 0;\">Positive cosines denote net movement downslope (deeper), warmward (higher bottom T), and up-HSI gradient; along-isobath % measures contour-following perpendicular to &nabla;z.</p>" *
+            "<h2>$t_title</h2>" *
+            "<p class=\"card-desc\">$t_desc</p>" *
             "<table><tr><th>Stratum</th><th>n</th><th>Downslope cos&psi;<sub>z</sub></th>" *
-            "<th>Downslope (km)</th><th>Along-Isobath</th><th>Warmward cos&psi;<sub>T</sub></th>" *
-            "<th>Mean &Delta;T (&deg;C)</th><th>Up-HSI cos&psi;<sub>h</sub></th></tr>$trows</table></div>"
+            "<th>Downslope (km)</th><th>Along-Isobath</th>$therm_hdr" *
+            "<th>Up-HSI cos&psi;<sub>h</sub></th></tr>$trows</table></div>"
     end
 
     # Multi-horizon MSD scaling & null-model LPPD comparison
@@ -3914,7 +4013,7 @@ function _path_analysis_inner_html(
 
     svg_disp = _svg_histogram(disps, "Net Displacement (km)", "#2563eb")
     svg_plen = _svg_histogram(plens, "Cumulative Bridge Length (km)", "#7c3aed")
-    svg_spd  = _svg_histogram(speeds, "Speed (km/yr)", "#d97706")
+    svg_spd  = _svg_histogram(speeds, "Speed (km/yr)", "#d97706"; clip_quantile = 0.96)
 
     disp_summary = isempty(disps) ? "—" : "$(round(mean(disps); digits=2)) / $(round(median(disps); digits=2))"
     plen_summary = isempty(plens) ? "—" : "$(round(mean(plens); digits=2)) / $(round(median(plens); digits=2))"
@@ -4242,10 +4341,10 @@ function _export_consolidated_dashboard_html(
         "corridors", "Corridors",
         "$(params.species_name) — Cumulative Markov Bridge Transit Corridors",
         "Corridor Transit Density", marine_indices, corr_vec;
-        cmap = :inferno, scale_mode = :sqrt_p99, tracks_key = "recon",
+        cmap = :inferno, scale_mode = :log_p99, tracks_key = "recon",
         highlight_mask = corr_hi_mask, highlight_label = "Core Corridor",
         description = "Shows where tagged crab most likely passed in transit between release and recapture (endpoints excluded). Brighter cells mark heavier traffic and yellow dots flag the top 8% core corridors; intensity reflects both movement routes and tagging coverage.",
-        scale_hint = "Higher values = greater cumulative in-transit probability across sampled tags."
+        scale_hint = "Higher values = greater cumulative in-transit probability across sampled tags (log scale)."
     ))
 
     # Tab 3: Directed Flux & Structural Bottlenecks
@@ -4255,10 +4354,10 @@ function _export_consolidated_dashboard_html(
             "bottlenecks", "Directed Flux & Bottlenecks",
             "$(params.species_name) — Net Directed Migration Flux & Structural Bottlenecks B(u)",
             "Bottleneck Index B(u)", marine_indices, db.bottleneck_score;
-            cmap = :plasma, scale_mode = :sqrt_p99, tracks_key = "flux",
+            cmap = :plasma, scale_mode = :log_p99, tracks_key = "flux",
             highlight_mask = db.bottleneck_mask, highlight_label = "Bottleneck",
             description = "Highlights narrow chokepoints where crab transit concentrates through few open marine neighbours (bright cells and yellow dots). Blue arrows show net dominant movement direction and strength.",
-            scale_hint = "Higher B(u) = heavier transit squeezed through fewer marine connections."
+            scale_hint = "Higher B(u) = heavier transit squeezed through fewer marine connections (log scale)."
         ))
     end
 
@@ -4309,11 +4408,11 @@ function _export_consolidated_dashboard_html(
         push!(map_layers_json, _encode_field_layer_json(
             "circuit", "Circuit Flow",
             "$(params.species_name) — Electrical Circuit Current Density & Pinch-Points",
-            "Current Density", marine_indices, circ.current_density;
-            cmap = :plasma, scale_mode = :sqrt_p99, tracks_key = "none",
+            "Interior Current Density", marine_indices, circ.current_density;
+            cmap = :plasma, scale_mode = :log_p99, tracks_key = "none",
             highlight_mask = pmask, highlight_label = "Pinch-Point",
-            description = "Models the ocean as an electrical resistor network where easier movement equals higher conductance. Bright areas carry the strongest multi-route connectivity flow, and yellow dots mark critical pinch-points.",
-            scale_hint = "Higher current = stronger domain-wide connectivity flow through this cell."
+            description = "Models the ocean as an electrical resistor network calibrated to the fitted habitat selectivity (release/recapture endpoints excluded). Bright areas carry the strongest multi-route transit flow, and yellow dots mark robust top-5% pinch-points.",
+            scale_hint = "Higher current = stronger domain-wide transit flow through this cell (log scale)."
         ))
     end
 
@@ -4323,9 +4422,9 @@ function _export_consolidated_dashboard_html(
             "agents", "Agent Space-Use",
             "$(params.species_name) — Forward-Projected Agent Visitation Probability",
             "Visit Probability", marine_indices, agent_space_use.visit_probability;
-            cmap = :viridis, scale_mode = :sqrt_p99, tracks_key = "agent",
+            cmap = :viridis, scale_mode = :log_p99, tracks_key = "agent",
             description = "Shows where simulated crabs accumulate when released and stepped forward freely under the fitted movement model (without conditioning on recapture locations), revealing natural aggregation zones.",
-            scale_hint = "Higher values = greater simulated visitation probability."
+            scale_hint = "Higher values = greater simulated visitation probability (log scale)."
         ))
     end
 
@@ -5140,11 +5239,21 @@ function _export_consolidated_dashboard_html(
           const u = Math.max(0.0, Math.min(1.0, (ev.clientX - rect.left) / rect.width));
           const vmin = Number(activeLayerCfg.vmin) || 0.0;
           const vmax = Number(activeLayerCfg.vmax) || 1.0;
+          const isLog = activeLayerCfg.scale === 'log_p99';
           const isSqrt = activeLayerCfg.scale === 'sqrt_p99';
-          const val = isSqrt ? (vmin + u * u * (vmax - vmin)) : (vmin + u * (vmax - vmin));
+          let val;
+          if (isLog) {
+            const vs = Math.max(Number(activeLayerCfg.vscale) || 1e-6, 1e-12);
+            val = vmin + vs * Math.expm1(u * Math.log1p(Math.max(0.0, vmax - vmin) / vs));
+          } else if (isSqrt) {
+            val = vmin + u * u * (vmax - vmin);
+          } else {
+            val = vmin + u * (vmax - vmin);
+          }
           const av = Math.abs(val);
-          const fmtVal = av >= 100 ? val.toFixed(1) : (av >= 1 ? val.toFixed(2) : val.toFixed(4));
-          const modeTxt = isSqrt ? 'Square-root scale (capped at 99th pct)' : 'Linear scale';
+          const fmtVal = av >= 100 ? val.toFixed(1) : (av >= 1 ? val.toFixed(2) : val.toFixed(5));
+          const modeTxt = isLog ? 'Logarithmic scale (capped at 99th pct)' :
+            (isSqrt ? 'Square-root scale (capped at 99th pct)' : 'Linear scale');
           const hintTxt = activeLayerCfg.scaleHint ? ('<br>' + activeLayerCfg.scaleHint) : '';
           legendTip.innerHTML = '<b>' + activeLayerCfg.label + ': ' + fmtVal + '</b><br>' + modeTxt + hintTxt;
           legendTip.style.display = 'block';
@@ -5188,7 +5297,8 @@ function _export_consolidated_dashboard_html(
           document.getElementById('smooth-controls-dock').style.display = 'block';
         } else {
           gradWrap.style.display = 'block';
-          const scaleDesc = cfg.scale === 'sqrt_p99' ? 'Square-root scale (capped at 99th pct)' : 'Linear scale';
+          const scaleDesc = cfg.scale === 'log_p99' ? 'Logarithmic scale (capped at 99th pct)' :
+            (cfg.scale === 'sqrt_p99' ? 'Square-root scale (capped at 99th pct)' : 'Linear scale');
           gradWrap.title = cfg.label + ' — ' + scaleDesc + (cfg.scaleHint ? ('. ' + cfg.scaleHint) : '');
           document.getElementById('legend-swatches').style.display = 'none';
           document.getElementById('legend-symbols').style.display = 'none';
@@ -6057,6 +6167,18 @@ function run_movement_analysis(
             apply_overrides(params, Dict{Symbol, Any}(:render_html => true)) :
             merge(params, (render_html = true,))
 
+        # Refresh circuit diagnostics if checkpoint predates interior-only gamma-calibrated circuit
+        has_new_circ = diagnostics_r !== nothing && hasproperty(diagnostics_r, :circuit) &&
+                       diagnostics_r.circuit !== nothing &&
+                       hasproperty(diagnostics_r.circuit, :interior_only) &&
+                       Bool(diagnostics_r.circuit.interior_only)
+        if !has_new_circ && wants_diagnostic(params_render, :circuit)
+            params_render.verbose && println("\n[figures-only] Refreshing interior-only gamma-calibrated circuit flow...")
+            diagnostics_r = compute_advanced_diagnostics(
+                loaded_r, path_res_r, params_render; kernels = kernels_r
+            )
+        end
+
         params_render.verbose && println("\n[figures-only] Regenerating dashboards...")
         dash_r = export_dashboards(
             loaded_r, kernels_r, path_res_r, diagnostics_r,
@@ -6274,7 +6396,7 @@ function run_movement_analysis(
     end
     
     path_res    = reconstruct_paths_and_diagnostics(loaded, kernels, params)
-    diagnostics = compute_advanced_diagnostics(loaded, path_res, params)
+    diagnostics = compute_advanced_diagnostics(loaded, path_res, params; kernels = kernels)
     validation  = execute_validation_analyses(loaded, fitted, kernels, params)
     dashboards  = export_dashboards(
         loaded, kernels, path_res, diagnostics, params, validation, agent_trajectories,

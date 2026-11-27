@@ -630,7 +630,8 @@ function current_density_map(
     resistance::Union{Nothing, AbstractVector{<:Real}} = nothing,
     hsi::Union{Nothing, AbstractVector{<:Real}} = nothing,
     conductance_power::Real = 1.0,
-    land_mask::Union{Nothing, AbstractVector{Bool}} = nothing
+    land_mask::Union{Nothing, AbstractVector{Bool}} = nothing,
+    include_endpoints::Bool = true
 )
     n_events = length(sources)
     if length(sinks) != n_events
@@ -656,14 +657,18 @@ function current_density_map(
     end
 
     current_density = zeros(Float64, S)
-    total_edge_currents = spzeros(Float64, S, S)
 
-    # Detect connected components to skip unreachable pairs
+    # Detect connected components and group unique valid (source, sink) pairs
+    C_sp = C isa SparseMatrixCSC ? C : sparse(Float64.(C))
+    rows_c = rowvals(C_sp)
+    vals_c = nonzeros(C_sp)
+
     g = SimpleGraph(S)
-    for j in 1:S
-        for i in (j + 1):S
-            if C[i, j] > 0.0
-                add_edge!(g, i, j)
+    for col in 1:S
+        for ptr in nzrange(C_sp, col)
+            row = rows_c[ptr]
+            if row > col && vals_c[ptr] > 0.0
+                add_edge!(g, row, col)
             end
         end
     end
@@ -673,45 +678,99 @@ function current_density_map(
         comp_id[comp] .= cid
     end
 
+    # Aggregate weights for identical (u, v) pairs to avoid redundant solves
+    pair_weights = Dict{Tuple{Int, Int}, Float64}()
     for k in 1:n_events
         u = sources[k]
         v = sinks[k]
         w_k = ev_weights[k]
         (w_k <= 0.0 || u == v) && continue
-
-        # Verify nodes are in valid range and water units
         if u < 1 || u > S || v < 1 || v > S
             continue
         end
         if !isnothing(land_mask) && (land_mask[u] || land_mask[v])
             continue
         end
-
-        # Verify both nodes lie in the same connected water component
         if comp_id[u] == 0 || comp_id[u] != comp_id[v]
             continue
         end
+        pair_weights[(u, v)] = get(pair_weights, (u, v), 0.0) + w_k
+    end
 
-        # Solve circuit voltages and currents for this transition
-        V_k, _, edge_I_k = solve_circuit_voltage(L, C, u, v; I_total = 1.0)
+    isempty(pair_weights) && return current_density, spzeros(Float64, S, S), L, C
 
-        # Accumulate edge currents
-        total_edge_currents .+= (w_k .* abs.(edge_I_k))
+    # Group valid pairs by connected component and factorize each grounded Laplacian once
+    pairs_by_comp = Dict{Int, Vector{Tuple{Int, Int, Float64}}}()
+    for ((u, v), w_uv) in pair_weights
+        cid = comp_id[u]
+        push!(get!(pairs_by_comp, cid, Tuple{Int, Int, Float64}[]), (u, v, w_uv))
+    end
 
-        # Accumulate nodal throughput current density
-        # For intermediate nodes: J_i = 0.5 * sum_j |I_ij|
-        # For source and sink: J_u = J_v = 1.0
-        for i in 1:S
-            if i == u || i == v
-                current_density[i] += w_k * 1.0
-            else
-                row_flow = sum(abs.(edge_I_k[i, :]))
-                if row_flow > 0.0
-                    current_density[i] += w_k * (0.5 * row_flow)
+    edge_abs_vals = zeros(Float64, nnz(C_sp))
+    V_buf = zeros(Float64, S)
+
+    for (cid, comp_pairs) in pairs_by_comp
+        comp = sort(comps[cid])
+        n_comp = length(comp)
+        n_comp < 2 && continue
+
+        # Ground the last node in the component; voltage shifts leave branch currents invariant
+        ref_node = comp[end]
+        act_nodes = comp[1:(n_comp - 1)]
+        n_act = length(act_nodes)
+        pos_in_act = zeros(Int, S)
+        for (loc_i, u_node) in enumerate(act_nodes)
+            pos_in_act[u_node] = loc_i
+        end
+
+        L_act = L[act_nodes, act_nodes]
+        F_act = try
+            cholesky(Symmetric(sparse(L_act)))
+        catch
+            nothing
+        end
+        L_act_dense = F_act === nothing ? (Matrix(L_act) + 1e-10 * I) : nothing
+
+        # Precompute component-local nonzero pointers of C_sp for O(|E_comp|) accumulation
+        b_act = zeros(Float64, n_act)
+        for (u, v, w_uv) in comp_pairs
+            fill!(b_act, 0.0)
+            pu = pos_in_act[u]
+            pv = pos_in_act[v]
+            pu > 0 && (b_act[pu] = 1.0)
+            pv > 0 && (b_act[pv] = -1.0)
+
+            V_act = F_act !== nothing ? (F_act \ b_act) : (L_act_dense \ b_act)
+            @inbounds for (loc_i, u_node) in enumerate(act_nodes)
+                V_buf[u_node] = V_act[loc_i]
+            end
+            V_buf[ref_node] = 0.0
+
+            @inbounds for col in comp
+                v_col = V_buf[col]
+                col_flow = 0.0
+                for ptr in nzrange(C_sp, col)
+                    c_val = vals_c[ptr]
+                    c_val > 0.0 || continue
+                    row = rows_c[ptr]
+                    i_abs = c_val * abs(V_buf[row] - v_col)
+                    edge_abs_vals[ptr] += w_uv * i_abs
+                    col_flow += i_abs
+                end
+                if col == u || col == v
+                    if include_endpoints
+                        current_density[col] += w_uv * 1.0
+                    end
+                elseif col_flow > 0.0
+                    current_density[col] += w_uv * (0.5 * col_flow)
                 end
             end
         end
     end
+
+    total_edge_currents = SparseMatrixCSC(
+        S, S, copy(C_sp.colptr), copy(C_sp.rowval), edge_abs_vals
+    )
 
     return current_density, total_edge_currents, L, C
 end
@@ -937,6 +996,7 @@ function posterior_circuit_inference(
     top_quantile::Real = 0.90,
     ci_alpha::Real = 0.05,
     conductance_power::Real = 1.0,
+    include_endpoints::Bool = true,
     seed::Union{Nothing, Int} = nothing
 )
     S = size(W, 1)
@@ -1004,7 +1064,8 @@ function posterior_circuit_inference(
             weights = weights,
             hsi = h_m,
             conductance_power = c_pow,
-            land_mask = land_mask
+            land_mask = land_mask,
+            include_endpoints = include_endpoints
         )
 
         dens_mat[:, m] = cur_dens

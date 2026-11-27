@@ -7,7 +7,7 @@ subtitle: >
   Consolidated Research Specification, Technical Pipeline Reference, and
   Empirical Synthesis for TethysPath.jl
 author: "TethysPath Group"
-date: "2026-11-26"
+date: "2026-11-27"
 format:
   html:
     toc: true
@@ -51,7 +51,7 @@ Despite continuous benthic habitat across deep channels, commercial management p
 Quantitative movement analysis requires keeping empirical observations distinct from model-dependent constructs:
 
 - **Empirical observables**: Mark/release and recapture coordinates, elapsed time between mark and recapture ($\Delta t$), carapace width (CW), carapace condition (CC), sex/maturity state, and observation modality—specifically fishery-independent Ocean Tracking Network (`OTN`) acoustic receiver detections versus commercial pot-trap (`BIO`) tag returns.
-- **Model-dependent representations**: Discrete-time Markov transition probabilities $\mathbf{P}$, conditioned forward-backward Markov-bridge trajectories, locally smoothed marine splines, outgoing step entropy $H(u)$, corridor canalization $K(u)$, Kirchhoff current density $J(u)$, and multi-step regional exchange matrices $\mathbf{P}^{365}$.
+- **Model-dependent representations**: Discrete-time Markov transition probabilities $\mathbf{P}$, conditioned forward-backward Markov-bridge trajectories and interior transit corridors, locally smoothed marine splines, 1-year effective dispersal area $A_{\text{eff}}(u)$, corridor canalization $K(u)$, interior Kirchhoff circuit current density $J^{\text{int}}(u)$, and multi-step regional exchange matrices $\mathbf{P}^{365}$.
 
 Because mark-recapture data supply endpoints without intermediate positional fixes, unconditioned chord-to-path "tortuosity" ratios, endpoint-inferred behavioural bouts, and deterministic shortest-path (`A*`) routes conflate geometric lattice artifacts with animal behaviour. `TethysPath.jl` replaces those heuristics with a single coherent probabilistic movement operator on a shoreline-constrained marine graph, paired with direct empirical gradient projections and modality-stratified Bayesian inference.
 
@@ -147,21 +147,31 @@ Once $\mathbf{P}$ is estimated, every spatial diagnostic follows directly from t
        +---------------+---------------+---------------+---------------+
        |               |               |               |               |
        v               v               v               v               v
-  Conditioned      Step Entropy     Structural      Annual Matrix   Forward IBM
-  Markov Bridge    & Canalization   Bottlenecks     P^365 (HSI-     Agent Space
-  & 5-Knot Spline  H(u), K(u)       B(u) = C/deg    Weighted)       Use (:agent)
+  Conditioned      1-Yr Effective   Structural      Annual Matrix   Forward IBM
+  Markov Bridge    Dispersal Area   Bottlenecks     P^365 (HSI-     Agent Space
+  & Corridors      A_eff(u) & K(u)  B(u) & Circuit  Weighted)       Use (:agent)
 ```
 
-- **Conditioned Markov bridges (`predict_bridge_path`)**: Given observed endpoints $(u_{\text{rel}}, u_{\text{rec}})$ separated by $K$ steps, backward reachability vectors $\mathbf{b}_{r+1} = \mathbf{P}\mathbf{b}_r / \|\mathbf{P}\mathbf{b}_r\|_1$ ($\mathbf{b}_1 = \mathbf{e}_{u_{\text{rec}}}$) yield the exact conditional forward step distribution:
+- **Conditioned Markov bridges and interior transit corridors (`predict_bridge_path`)**: Given observed endpoints $(u_{\text{rel}}, u_{\text{rec}})$ separated by $K$ steps, backward reachability vectors $\mathbf{b}_{r+1} = \mathbf{P}\mathbf{b}_r / \|\mathbf{P}\mathbf{b}_r\|_1$ ($\mathbf{b}_1 = \mathbf{e}_{u_{\text{rec}}}$) yield the exact conditional forward step distribution:
 
-$$\mathbb{P}(X_\tau = v \mid X_{\tau-1} = u, X_K = u_{\text{rec}}) = \frac{P_{uv}\, b_{K-\tau+1}(v)}{\sum_w P_{uw}\, b_{K-\tau+1}(w)}.$$
+$$\mathbb{P}(X_\tau = v \mid X_{\tau-1} = u, X_K = u_{\text{rec}}) = \frac{P_{uv}\, b_{K-\tau+1}(v)}{\sum_w P_{uw}\, b_{K-\tau+1}(w)}, \qquad q_\tau(u) \propto (\mathbf{e}_{u_{\text{rel}}}^\top \mathbf{P}^\tau)_u\, (\mathbf{P}^{K-\tau}\mathbf{e}_{u_{\text{rec}}})_u.$$
 
+  To construct **Cumulative Markov Bridge Transit Corridors**, the endpoints ($\tau = 0$ and $\tau = K$) are excluded before averaging interior marginals $q_\tau(u)$ across $\tau = 1, \dots, K-1$ and summing over sampled trajectories. Excluding endpoints prevents release and recapture fishing concentrations from masking the in-transit probability cloud.
 - **Loop-free 5-knot marine splines (`reconstruct_all_event_trajectories`, `smooth_marine_polyline`)**: To visualize overall predicted trajectories across all $N = 5{,}066$ encounters without random-walk loops or $60^\circ$ hexagonal zig-zags, each conditioned bridge undergoes Lawler loop erasure [@Lawler_1980], three-pass marine-guarded moving-average relaxation, selection of five arc-length control knots (subdivided only when a chord intersects land), and centripetal ($\alpha = 0.5$) Catmull-Rom cubic spline interpolation [@Yuksel_et_al_2011] with raster shoreline damping.
-- **Step entropy, canalization, and structural bottlenecks (`compute_corridor_canalization`)**: For marine units with degree $d_u \ge 2$, normalized non-self step entropy $H(u) \in [0, 1]$ and interior bridge transit density $\tilde{C}(u) = \min(1, C(u)/P_{99}(C))$ define:
+- **1-year effective dispersal area (`compute_effective_dispersal_area`)**: Single-step outgoing entropy $H(u)$ saturates near $1.0$ across homogeneous-HSI shelf zones (`99%` of marine units within $[0.862, 1.000]$) and is therefore replaced as a standalone map by the 365-day effective dispersal footprint, computed via binary matrix exponentiation of the marine submatrix $\mathbf{P}_m^{365}$:
+
+$$H_{365}(u) = -\sum_{v \in \mathcal{M}} [\mathbf{P}^{365}]_{uv}\log[\mathbf{P}^{365}]_{uv}, \qquad A_{\text{eff}}(u) = \exp\!\bigl(H_{365}(u)\bigr)\,A_{\text{cell}}, \qquad r_{\text{eff}}(u) = \sqrt{\frac{A_{\text{eff}}(u)}{\pi}}.$$
+
+  Here $A_{\text{eff}}(u)$ ($\text{km}^2$) measures the effective marine area explored over one year by an individual starting in cell $u$, directly separating locally retentive coastal embayments from broad open-shelf mixing zones.
+- **Corridor canalization and structural bottlenecks (`compute_corridor_canalization`)**: For marine units with degree $d_u \ge 2$, normalized non-self step entropy $H(u) \in [0, 1]$ and interior bridge transit density $\tilde{C}(u) = \min(1, C(u)/P_{99}(C))$ define:
 
 $$H(u) = -\frac{1}{\log d_u}\sum_{v \ne u}\tilde{P}_{uv}\log\tilde{P}_{uv}, \qquad K(u) = \sqrt{\tilde{C}(u)}\,\bigl(1 - 0.5\,H(u)\bigr), \qquad B(u) = \frac{C_{\text{domain}}(u)}{\max(1, d_u)}.$$
 
-- **Kirchhoff circuit current density (`current_density_map`)**: Solves $\mathbf{L}_C\mathbf{V} = \mathbf{I}_{\text{ext}}$ with symmetric edge conductances $C_{uv} = W_{\text{marine}, uv}\sqrt{H_u H_v}$ on the 12-month mean HSI [@McRae_et_al_2008] to locate low-degree current pinch-points persistent in $\ge 80\%$ of interannual HSI realizations.
+- **Interior $\hat{\gamma}$-calibrated Kirchhoff circuit current density (`current_density_map`)**: Models the marine graph as a resistive network $\mathbf{L}_C\mathbf{V} = \mathbf{I}_{\text{ext}}$ [@McRae_et_al_2008] with symmetric edge conductances calibrated to the MCMC-fitted habitat gradient $\hat{\gamma}$ on the 12-month mean HSI:
+
+$$C_{uv} = W_{\text{marine}, uv}\,\exp\!\left(\frac{\hat{\gamma}}{2}(H_u + H_v)\right), \qquad J_i^{\text{int}} = \sum_{(u,v)} w_{uv}\!\left(\mathbb{I}[i \notin \{u, v\}]\,\frac{1}{2}\sum_{j \sim i}\bigl|I_{ij}^{(u,v)}\bigr|\right).$$
+
+  Unique non-stationary marine origin-destination pairs receive log-damped weights $w_{uv} = 1 + \ln(n_{uv})$, endpoint injection spikes ($J_u = J_v = 1$) are excluded (`include_endpoints = false`) so transit bottlenecks are not drowned out by tagging ports, and each connected component Laplacian is Cholesky-factorized once. Robust pinch-points are defined as marine units falling in the upper 5% (`top_quantile = 0.95`) of $J^{\text{int}}$ in $\ge 80\%$ of interannual HSI realizations, displayed on a median-anchored logarithmic colour scale (`log_p99`).
 - **1-year ($\mathbf{P}^{365}$) HSI-weighted regional connectivity (`compute_stock_connectivity_matrix`)**: Promotes $\mathbf{P}$ to 365 daily steps and aggregates across management polygons $R_a, R_b$ weighted by source suitability $H_u$:
 
 $$M_{ab}^{(1\text{ yr})} = \frac{\sum_{u \in R_a} H_u \sum_{v \in R_b} [\mathbf{P}^{365}]_{uv}}{\sum_{u \in R_a} H_u}, \qquad \sum_b M_{ab}^{(1\text{ yr})} = 1.$$
@@ -229,7 +239,32 @@ While shelf-wide circular averaging yields a low resultant length ($\bar{R} = 0.
 - **Cabot Strait and Northeastern Cape Breton**: Southwestward to westward steering along the Laurentian Channel margin (`46.9°N, 60.1°W`: $\bar{\theta} = 237.2^\circ$, $\bar{R} = 0.582$; `47.3°N, 60.7°W`: $\bar{\theta} = 226.5^\circ$, $\bar{R} = 0.362$; `46.4°N, 59.7°W`: $\bar{\theta} = 272.7^\circ$, $\bar{R} = 0.301$; all $p < 10^{-4}$).
 - **Eastern and Outer Scotian Shelf**: East-southeast movement off Chedabucto / Canso (`45.4°N, 60.8°W`: $\bar{\theta} = 104.5^\circ$, $\bar{R} = 0.321$, $n = 331$, $p < 10^{-4}$) converging with northwestward movement from the outer shelf (`45.2°N, 58.4°W`: $\bar{\theta} = 308.9^\circ$, $\bar{R} = 0.436$, $p = 2 \times 10^{-5}$).
 
-## 5.4. Annual ($\mathbf{P}^{365}$) Regional Connectivity and Structural Bottlenecks
+## 5.4. Markov Bridge Transit Corridors, Canalization, and 1-Year Effective Dispersal
+
+Complementing individual smoothed trajectories, three probabilistic spatial fields characterize where snow crab travel in transit, how tightly movement is channelled, and how broadly populations mix over an annual cycle:
+
+| Spatial Diagnostic | Active Units ($> 0$) | Median | 90th Pct | 99th Pct | Maximum | Flagged Hotspots |
+|:-------------------|:---------------------|:-------|:---------|:---------|:--------|:-----------------|
+| Markov Bridge Transit Corridors $C(u)$ | 2,848 / 3,487 | 0.00691 | 0.1845 | 0.8078 | 5.561 | 256 Core Corridors ($\ge P_{92}$) |
+| Corridor Canalization $K(u)$ | 3,069 / 3,487 | 0.0296 | 0.1802 | 0.4326 | 1.000 | 318 Conduits ($\ge P_{90}$) |
+| Directed Flux Bottlenecks $B(u)$ | 1,226 / 3,487 | 0.0000 | 0.2842 | 1.636 | 7.245 | 123 Bottlenecks ($B \ge 0.742$) |
+| Interior Circuit Current $J^{\text{int}}(u)$ ($\hat{\gamma} = 4.42$) | 3,171 / 3,487 | 0.00102 | 0.00774 | 0.02015 | 0.06694 | 149 Robust Pinch-Points ($P \ge 0.80$, top 5%) |
+| 1-Yr Effective Dispersal $A_{\text{eff}}(u)$ ($\text{km}^2$) | 3,487 / 3,487 | 25,036 | 35,739 | 43,720 | 46,310 | — (continuous linear scale) |
+| Forward Agent Space-Use (visit prob.) | 1,778 / 3,487 | 0.005 | 0.035 | 0.085 | 0.285 | — (unconditioned `:agent` rollout) |
+
+- **Cumulative Markov Bridge Transit Corridors ($C(u)$)**: Summing interior bridge occupancy across sampled tags ($\tau \in \{1, \dots, K-1\}$, excluding endpoints) maps the full probabilistic in-transit cloud rather than single deterministic routes. Across the `3,487` marine units, `2,848` carry positive transit density (`median = 0.00691`, `p99 = 0.8078`, `max = 5.561`), and `256` core corridor cells ($\ge 92\text{nd}$ percentile of positive density) trace continuous shelf-scale pathways linking eastern Cape Breton, Misaine/Emerald Basins, and the Southern Gulf. Because bridge density is conditioned on observed mark-recapture endpoints, bright corridors reflect both favourable habitat connectivity and spatial tagging coverage; dark regions may reflect either habitat avoidance or sparse bracketing endpoints.
+- **Corridor Canalization ($K(u)$)**: Weighting bridge density by directional focus $(1 - 0.5\,H(u))$ isolates `318` narrow, habitat-guided conduits (`median = 0.0296`, `p99 = 0.4326`, `max = 1.000`) from broad diffusive basins where crabs spread isotropically.
+- **1-Year Effective Dispersal Area ($A_{\text{eff}}(u)$)**: Unlike 1-step outgoing entropy (which saturated near `1.0` across `99%` of the shelf), propagating $\mathbf{P}_m^{365}$ resolves more than an order of magnitude in spatial mixing (`3,194.4` to `46,310.3 km²`, corresponding to `48.7` to `706.5` effective 5 km cells and equivalent circular radii $r_{\text{eff}}$ of `31.9` to `121.4 km`; `p10 = 10,729.5 km²`, `median = 25,036.4 km²`, `p90 = 35,739.4 km²`). Confined coastal embayments, fjords, and narrow straits exhibit tight annual retention ($r_{\text{eff}} \approx 32\text{--}58\text{ km}$), whereas open shelf plains support broad annual mixing ($r_{\text{eff}} \approx 107\text{--}121\text{ km}$).
+
+## 5.5. Interior Kirchhoff Circuit Current Density, Structural Bottlenecks, and Pinch-Points
+
+Electrical circuit flow provides an all-paths connectivity perspective complementary to Markov-bridge corridors. Initial uncalibrated runs using weak conductance contrast (`conductance_power = 1.0`, $e^1 \approx 2.7\times$ across $[0, 1]$ HSI) and endpoint current injections ($J_u = J_v = 1.0$) produced a visually flat shelf field (`max / median ~ 94×`) in which `317` pinch-point markers clustered on tagging ports rather than transit chokepoints. Three methodological refinements resolved this degeneracy:
+
+- **Habitat-calibrated conductance ($\hat{\gamma} = 4.42$)**: Scaling edge conductance as $C_{uv} = W_{\text{marine}, uv}\exp(\frac{\hat{\gamma}}{2}(H_u + H_v))$ ($e^{\hat{\gamma}} \approx 83\times$ contrast between poor and optimal habitat) focuses multi-route electrical current along the cold depositional basins and shelf troughs inferred from telemetry.
+- **Endpoint exclusion and log-damped pair weighting**: Computing pure interior transit current (`include_endpoints = false`) across unique non-stationary marine origin-destination pairs weighted by $1 + \ln(n_{uv})$ removes port-level delta spikes and prevents a single heavily fished area from dominating the network.
+- **Logarithmic scaling and sharper pinch-point criterion**: Mapping interior current (`p25 = 0.00024`, `median = 0.00102`, `p75 = 0.00399`, `p90 = 0.00774`, `p99 = 0.02015`, `max = 0.06694`) on a median-anchored logarithmic stretch (`log_p99`, colourbar midpoint `0.0041` aligned with `p75`) reveals both primary inter-basin highways and secondary shelf routes across `3,171 / 3,487` active marine units. Robust pinch-points ($P \ge 0.80$ across interannual HSI draws at `top_quantile = 0.95`) sharpen from `317` to `149` localized chokepoints along Cabot Strait, the St. Anns / Laurentian slope margin, and inter-basin shelf gullies, corroborating the `123` degree-normalized structural bottlenecks ($B(u) \ge 0.742$) and `180` dominant net directed flux arrows derived from Markov-bridge routing.
+
+## 5.6. Annual ($\mathbf{P}^{365}$) Regional Connectivity
 
 | From \ To (1-Yr $\mathbf{P}^{365}$) | N-ENS [95% CI] | S-ENS [95% CI] | 4X [95% CI] | CFA19 / S.Gulf [95% CI] |
 |:------------------------------------|:---------------|:---------------|:------------|:------------------------|
@@ -237,8 +272,6 @@ While shelf-wide circular averaging yields a low resultant length ($\bar{R} = 0.
 | **S-ENS** | 0.006 [0.005, 0.008] | 0.955 [0.946, 0.964] | 0.039 [0.031, 0.046] | < 0.001 [0.000, 0.000] |
 | **4X** | 0.000 [0.000, 0.000] | 0.163 [0.129, 0.194] | 0.837 [0.806, 0.871] | 0.000 [0.000, 0.000] |
 | **CFA19 / S.Gulf** | 0.008 [0.005, 0.010] | < 0.001 [0.000, 0.000] | 0.000 [0.000, 0.000] | 0.992 [0.990, 0.995] |
-
-Domain-wide bridge aggregation across $350 / 1{,}432$ unique origin-destination pairs identifies `123 / 3,487` critical structural bottleneck units ($B(u) \ge 0.742$, peak transit density `40.5` tag-equivalents across `3,668` active directed edges), complemented by `317 / 3,487` robust Kirchhoff pinch-points ($P \ge 0.80$) concentrated along Cabot Strait, the St. Anns / Laurentian slope margin, and inter-basin shelf troughs.
 
 ---
 
@@ -252,14 +285,15 @@ Contrasting `OTN` acoustic arrays with `BIO` commercial pot recaptures demonstra
 
 - **Asymmetric source-sink bias in closed-area assessments**: Annual transition estimates indicate that N-ENS exports `13.3%` southward to S-ENS and `4.6%` (`127` observed cross-boundary tags) into CFA 19 / Southern Gulf, while 4X exports `16.3%` into S-ENS against `3.9%` return inflow. Closed-population biomass models applied separately to N-ENS or 4X will absorb net emigration into elevated apparent natural mortality or underestimated productivity, whereas S-ENS (`95.5%` retention plus net immigration from both flanks) receives an unmodeled demographic subsidy.
 - **Operational coupling to spatially explicit assessment (`TethysBio`)**: Exporting calibrated dispersal scales (`max_move_m_per_year = 214.4 km/yr`, softmax temperature `0.226`) in `movement_stats.toml` allows spatial stock-assessment models to replace ad-hoc diffusion priors with empirically bounded movement operators.
-- **Climate warming and corridor constriction**: Because `62.7%` of displacements follow bathymetric contours and track high-suitability cold troughs, warming of shallow banks (`< 60 m`) and contraction of the Cold Intermediate Layer are expected to compress snow crab redistribution into the `123` structural bottleneck units and `317` Kirchhoff pinch-points (Cabot Strait, St. Anns / Laurentian slope, and cross-shelf gullies). Protecting bottleneck corridors (including spatial refugia such as the St. Anns Bank Marine Protected Area) and avoiding concentrated harvest inside narrow inter-basin conduits preserves regional re-colonization capacity.
+- **Climate warming and corridor constriction**: Because `62.7%` of displacements follow bathymetric contours and track high-suitability cold troughs, warming of shallow banks (`< 60 m`) and contraction of the Cold Intermediate Layer are expected to compress snow crab redistribution into the `256` core Markov-bridge corridor cells, `123` structural bottleneck units, and `149` robust interior Kirchhoff pinch-points (Cabot Strait, St. Anns / Laurentian slope, and cross-shelf gullies). Protecting bottleneck corridors (including spatial refugia such as the St. Anns Bank Marine Protected Area) and avoiding concentrated harvest inside narrow inter-basin conduits preserves regional re-colonization capacity.
+- **Local retention vs. shelf-scale mixing**: The 1-year effective dispersal footprint ($A_{\text{eff}}$ spanning `3,194` to `46,310 km²`, $r_{\text{eff}} = 32\text{--}121\text{ km}$) demonstrates that management vulnerability is spatially heterogeneous even within a single CFA: local depletion in low-$A_{\text{eff}}$ embayments and coastal channels recovers more slowly via immigration than depletion on high-$A_{\text{eff}}$ open shelf plains.
 - **Telemetry and tagging survey design**: Combining fishery-independent acoustic receiver gates positioned across identified pinch-points with commercial tagging paired to independent logbook trap-haul effort resolves the structural trade-off between `OTN` spatial coverage and `BIO` effort confounding, and directly enables joint survival-detection-movement separation (`:recapture`).
 
 ---
 
 # 7. Conclusions
 
-1. A single three-parameter daily Markov operator ($\alpha, \rho, \gamma$) on a `1.25`-arcminute shoreline-constrained 5 km marine lattice unifies trajectory reconstruction, corridor canalization, Kirchhoff pinch-point detection, and annual regional exchange without overland or inland-lake routing artifacts (`0` land/lake defects across `3,487` marine units and `5,066` encounters).
+1. A single three-parameter daily Markov operator ($\alpha, \rho, \gamma$) on a `1.25`-arcminute shoreline-constrained 5 km marine lattice unifies trajectory reconstruction, interior Markov-bridge transit corridors (`256` core corridor cells), 1-year effective dispersal footprints (`3,194–46,310 km²`), interior $\hat{\gamma}$-calibrated Kirchhoff pinch-point detection (`149` robust pinch-points), and annual regional exchange without overland or inland-lake routing artifacts (`0` land/lake defects across `3,487` marine units and `5,066` encounters).
 2. Empirical snow crab movement on the Scotian Shelf and Southern Gulf is strongly habitat-directed ($\hat{\alpha} \approx 0.82$, $\hat{\gamma} \approx 4.4$, up-HSI $\overline{\cos\psi_h} = +0.262$), predominantly contour-following (`62.7%` along-isobath), seasonally reversible across depth gradients (winter upslope vs. summer-autumn downslope), and locally steered by regional topography (`14 / 19` significant $100\text{ km}$ bearing sectors).
 3. Administrative Crab Fishing Areas are asymmetrically coupled at annual timescales (`N-ENS -> S-ENS: 13.3%`, `N-ENS -> CFA 19 / S.Gulf: 4.6%`, `4X -> S-ENS: 16.3%`). Future work should prioritize time-varying seasonal MCMC likelihoods, independent commercial effort offsets, adaptive-covariance or gradient-based samplers to raise MCMC `ESS`, and dedicated Southern Gulf HSI surfaces.
 
@@ -312,7 +346,7 @@ julia --project=. TethysPathRun.jl --config=configs/snowcrab.toml --figures-only
 Pipeline outputs written to `../lakehouse/TethysPath/` include:
 
 - `movement_checkpoint.zarr` (Phases 1-3) and `movement_results_checkpoint.zarr` (Phases 1-6).
-- `movement_dashboard.html` (`~69 KB` shell) and `movement_dashboard.data.zz` (`~663 KB` RFC 1950 zlib-compressed JSON sidecar; see [github_pages.md](github_pages.md) for local HTTP and GitHub Pages `gh-pages` deployment). The dashboard opens on **Smoothed Trajectories** (all $5{,}066$ events as loop-free `5`-knot marine splines colour-coded by time between mark and recapture, with green Mark/Release points, gold Recapture stars, movement-direction arrowheads, left-docked legends/controls, and click-map highlighting defaulting to `Nearest Marks / Releases`), followed by **Paths & HSI**, **Corridors**, **Directed Flux & Bottlenecks**, **Corridor Canalization**, **1-Yr Effective Dispersal** ($A_{\text{eff}}(u) = \exp(H(\mathbf{P}^{365}_{u,\cdot})) A_{\text{cell}}$ in $\text{km}^2$), **Compass Bearing Roses (100 km)**, **Circuit Flow**, **Agent Space-Use**, **Tessellation & Depth**, **Path Analysis & Diagnostics**, and **Posterior Predictive (PPC)**.
+- `movement_dashboard.html` (`~77 KB` shell) and `movement_dashboard.data.zz` (`~704 KB` RFC 1950 zlib-compressed JSON sidecar; see [github_pages.md](github_pages.md) for local HTTP and GitHub Pages `gh-pages` deployment). The dashboard opens on **Smoothed Trajectories** (all $5{,}066$ events as loop-free `5`-knot marine splines colour-coded by time between mark and recapture, with green Mark/Release points, gold Recapture stars, movement-direction arrowheads, left-docked legends/controls, and click-map highlighting defaulting to `Nearest Marks / Releases`), followed by **Paths & HSI**, **Corridors**, **Directed Flux & Bottlenecks**, **Corridor Canalization**, **1-Yr Effective Dispersal** ($A_{\text{eff}}(u) = \exp(H(\mathbf{P}^{365}_{u,\cdot})) A_{\text{cell}}$ in $\text{km}^2$), **Compass Bearing Roses (100 km)**, **Circuit Flow** (interior $\hat{\gamma}$-calibrated Kirchhoff current on a `log_p99` scale with robust top-5% pinch-points), **Agent Space-Use**, **Tessellation & Depth**, **Path Analysis & Diagnostics**, and **Posterior Predictive (PPC)**. Every map panel includes a concise general-audience interpretation block, an interactive hover-over colour-scale readout (matching linear, square-root, or logarithmic transforms), and a per-panel background tessellation toggle; every report card includes a plain-language caption.
 - `movement_stats.toml`, `acoustic_vs_trap_inference.csv`, `gradient_taxis_summary.csv`, `spatial_bearing_roses_100km.csv`, `corridor_canalization_summary.csv`, `effective_dispersal_1yr.csv`, `stock_connectivity_summary.csv`, `stock_connectivity_credible_intervals.csv`, `movement_path_metrics.csv`, `movement_agent_space_use.csv`, and `posterior_predictive_summary.txt`.
 
 Inspecting stored Zarr checkpoints in Julia without re-running MCMC:

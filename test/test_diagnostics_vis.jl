@@ -318,6 +318,22 @@ include("test_fixtures.jl")
     @test all(a -> a >= eff_disp.cell_area_km2 - 1e-9, eff_disp.effective_area_km2)
     @test all(r -> r > 0.0, eff_disp.effective_radius_km)
 
+    # Interior-only circuit current excludes endpoint delta spikes while keeping interior flow
+    cur_with_ep, _, _, _ = current_density_map(
+        loaded_diag.W, [1], [3]; hsi = loaded_diag.hsi_vec,
+        conductance_power = 3.0, include_endpoints = true
+    )
+    cur_int_only, _, _, _ = current_density_map(
+        loaded_diag.W, [1], [3]; hsi = loaded_diag.hsi_vec,
+        conductance_power = 3.0, include_endpoints = false
+    )
+    @test cur_with_ep[1] ≈ 1.0
+    @test cur_with_ep[3] ≈ 1.0
+    @test cur_int_only[1] == 0.0
+    @test cur_int_only[3] == 0.0
+    @test cur_int_only[2] > 0.0
+    @test isapprox(cur_int_only[2], cur_with_ep[2]; atol = 1e-12)
+
     # Paired HTML shell + zlib-compressed .data.zz sidecar for GitHub Pages deployment
     tmp_dash = joinpath(tmp_assim, "movement_dashboard.html")
     tmp_zz   = joinpath(tmp_assim, "movement_dashboard.data.zz")
