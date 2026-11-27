@@ -790,11 +790,21 @@ function bootDashboard(payload) {
       const u = Math.max(0.0, Math.min(1.0, (ev.clientX - rect.left) / rect.width));
       const vmin = Number(activeLayerCfg.vmin) || 0.0;
       const vmax = Number(activeLayerCfg.vmax) || 1.0;
+      const isLog = activeLayerCfg.scale === 'log_p99';
       const isSqrt = activeLayerCfg.scale === 'sqrt_p99';
-      const val = isSqrt ? (vmin + u * u * (vmax - vmin)) : (vmin + u * (vmax - vmin));
+      let val;
+      if (isLog) {
+        const vs = Math.max(Number(activeLayerCfg.vscale) || 1e-6, 1e-12);
+        val = vmin + vs * Math.expm1(u * Math.log1p(Math.max(0.0, vmax - vmin) / vs));
+      } else if (isSqrt) {
+        val = vmin + u * u * (vmax - vmin);
+      } else {
+        val = vmin + u * (vmax - vmin);
+      }
       const av = Math.abs(val);
-      const fmtVal = av >= 100 ? val.toFixed(1) : (av >= 1 ? val.toFixed(2) : val.toFixed(4));
-      const modeTxt = isSqrt ? 'Square-root scale (capped at 99th pct)' : 'Linear scale';
+      const fmtVal = av >= 100 ? val.toFixed(1) : (av >= 1 ? val.toFixed(2) : val.toFixed(5));
+      const modeTxt = isLog ? 'Logarithmic scale (capped at 99th pct)' :
+        (isSqrt ? 'Square-root scale (capped at 99th pct)' : 'Linear scale');
       const hintTxt = activeLayerCfg.scaleHint ? ('<br>' + activeLayerCfg.scaleHint) : '';
       legendTip.innerHTML = '<b>' + activeLayerCfg.label + ': ' + fmtVal + '</b><br>' + modeTxt + hintTxt;
       legendTip.style.display = 'block';
@@ -838,7 +848,8 @@ function bootDashboard(payload) {
       document.getElementById('smooth-controls-dock').style.display = 'block';
     } else {
       gradWrap.style.display = 'block';
-      const scaleDesc = cfg.scale === 'sqrt_p99' ? 'Square-root scale (capped at 99th pct)' : 'Linear scale';
+      const scaleDesc = cfg.scale === 'log_p99' ? 'Logarithmic scale (capped at 99th pct)' :
+        (cfg.scale === 'sqrt_p99' ? 'Square-root scale (capped at 99th pct)' : 'Linear scale');
       gradWrap.title = cfg.label + ' — ' + scaleDesc + (cfg.scaleHint ? ('. ' + cfg.scaleHint) : '');
       document.getElementById('legend-swatches').style.display = 'none';
       document.getElementById('legend-symbols').style.display = 'none';
