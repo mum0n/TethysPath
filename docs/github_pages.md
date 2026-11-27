@@ -12,7 +12,7 @@ git switch main
 
 `export_dashboards` writes two paired files to the configured output directory (for example, `../lakehouse/TethysPath/`):
 
-- `movement_dashboard.html`: Canvas-backed (`preferCanvas: true`) Leaflet.js dashboard shell with left-docked legends and controls, tab bar (`Smoothed Trajectories` default first tab, `Paths & HSI`, `Corridors`, `Directed Flux & Bottlenecks`, `Corridor Canalization`, `Step Entropy`, `Compass Bearing Roses (100 km)`, `Circuit Flow`, `Agent Space-Use`, `Tessellation & Depth`, plus report tabs), and click-on-map selection defaulting to `Nearest Marks / Releases`.
+- `movement_dashboard.html`: Canvas-backed (`preferCanvas: true`) Leaflet.js dashboard shell with left-docked legends and controls, tab bar (`Smoothed Trajectories` default first tab, `Paths & HSI`, `Corridors`, `Directed Flux & Bottlenecks`, `Corridor Canalization`, `1-Yr Effective Dispersal`, `Compass Bearing Roses (100 km)`, `Circuit Flow`, `Agent Space-Use`, `Tessellation & Depth`, plus report tabs), and click-on-map selection defaulting to `Nearest Marks / Releases`.
 - `movement_dashboard.data.zz`: RFC 1950 zlib-compressed JSON sidecar containing the shoreline-clipped hexagonal marine cells, `5`-knot centripetal Catmull-Rom spline trajectories across all mark-recapture events, direction arrowheads, `100 km` SVG bearing roses, and diagnostic field layers.
 
 Zarr checkpoints (`movement_checkpoint.zarr`, `movement_results_checkpoint.zarr`) are used only by the Julia pipeline and are not required by the browser.

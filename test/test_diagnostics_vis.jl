@@ -27,7 +27,7 @@ include("test_fixtures.jl")
 
     # Posterior Path Ensemble Panel
     # Interactive visualisations and Leaflet maps were removed from the package
-    # (results inspection is documented in docs/TethysPathNotes.md).
+    # (results inspection is documented in docs/snowcrab_movement_connectivity_research_document.md).
 
     # Trait-Movement Associations OLS (without endpoint efficiency/tortuosity)
     obs_df = DataFrame(tag_id = 1:10, carapace_width = [95.0, 102.0, 108.0, 115.0, 120.0, 125.0, 130.0, 135.0, 140.0, 145.0])
@@ -309,6 +309,15 @@ include("test_fixtures.jl")
     @test !occursin("liberty", lowercase(sm_json))
     @test occursin("< 1 month", bins_json)
 
+    # 1-Year effective dispersal area A_eff(u) = exp(H(P^K)) * A_cell
+    eff_disp = compute_effective_dispersal_area(
+        loaded_diag, (P_kernel = P_diag,); horizon_steps = 30
+    )
+    @test eff_disp.horizon_steps == 30
+    @test eff_disp.cell_area_km2 > 0.0
+    @test all(a -> a >= eff_disp.cell_area_km2 - 1e-9, eff_disp.effective_area_km2)
+    @test all(r -> r > 0.0, eff_disp.effective_radius_km)
+
     # Paired HTML shell + zlib-compressed .data.zz sidecar for GitHub Pages deployment
     tmp_dash = joinpath(tmp_assim, "movement_dashboard.html")
     tmp_zz   = joinpath(tmp_assim, "movement_dashboard.data.zz")
@@ -317,7 +326,7 @@ include("test_fixtures.jl")
         (paths = Dict("t1" => [1, 2]), corridors = Dict(), domain_bottlenecks = nothing),
         (circuit = nothing,), TethysPathConfig(; verbose = false),
         nothing, NamedTuple[], NamedTuple[], nothing, nothing, nothing, nothing;
-        smooth_events = all_evs
+        smooth_events = all_evs, eff_dispersal = eff_disp
     )
     @test isfile(tmp_dash)
     @test isfile(tmp_zz)
@@ -326,6 +335,8 @@ include("test_fixtures.jl")
     ))
     @test occursin("\"shared_cells\":", raw_sidecar)
     @test occursin("\"smooth_events\":", raw_sidecar)
+    @test occursin("1-Yr Effective Dispersal", raw_sidecar)
+    @test !occursin("Step Entropy", raw_sidecar)
 
     rm(tmp_assim; recursive = true, force = true)
 end

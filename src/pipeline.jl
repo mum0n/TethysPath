@@ -4123,7 +4123,8 @@ function _export_consolidated_dashboard_html(
     bio_strat = nothing,
     spatial_roses = nothing,
     taxis_proj = nothing,
-    smooth_events = NamedTuple[]
+    smooth_events = NamedTuple[],
+    eff_dispersal = nothing
 )::String
     mkpath(dirname(filepath))
     mesh = loaded.mesh
@@ -4237,7 +4238,7 @@ function _export_consolidated_dashboard_html(
         ))
     end
 
-    # Tab 3b: Spatial Corridor Canalization, Step Entropy, & 100 km Compass Roses
+    # Tab 3b: Spatial Corridor Canalization & 1-Year Effective Dispersal Area
     if validation !== nothing && hasproperty(validation, :corridor_canalization) &&
        validation.corridor_canalization !== nothing
         cc = validation.corridor_canalization
@@ -4248,10 +4249,13 @@ function _export_consolidated_dashboard_html(
             cmap = :inferno, scale_mode = :sqrt_p99, tracks_key = "none",
             highlight_mask = cc.conduit_mask, highlight_label = "Conduit"
         ))
+    end
+    if eff_dispersal !== nothing && hasproperty(eff_dispersal, :effective_area_km2) &&
+       length(eff_dispersal.effective_area_km2) >= n_units
         push!(map_layers_json, _encode_field_layer_json(
-            "entropy", "Step Entropy",
-            "$(params.species_name) — Outgoing Marine Step Entropy H(u)",
-            "Normalized Step Entropy H(u)", marine_indices, cc.step_entropy;
+            "effective_dispersal", "1-Yr Effective Dispersal",
+            "$(params.species_name) — 1-Year Effective Dispersal Area A_eff(u) = exp(H(P^$(eff_dispersal.horizon_steps))) * A_cell",
+            "1-Yr Effective Dispersal Area (km²)", marine_indices, eff_dispersal.effective_area_km2;
             cmap = :viridis, scale_mode = :linear, tracks_key = "none"
         ))
     end
@@ -5524,6 +5528,16 @@ function export_dashboards(
                 NamedTuple[]
             end
 
+            eff_dispersal = try
+                ed = compute_effective_dispersal_area(loaded, kernels; step_years = step_yr)
+                ed_csv = export_effective_dispersal_csv(ed, loaded, out_dir)
+                push!(written_files, ed_csv)
+                ed
+            catch e
+                _record_panel_skip("1-Yr effective dispersal area", e)
+                nothing
+            end
+
             dash_html = joinpath(out_dir, "movement_dashboard.html")
             dash_sidecar = joinpath(out_dir, "movement_dashboard.data.zz")
             _export_consolidated_dashboard_html(
@@ -5532,7 +5546,7 @@ function export_dashboards(
                 mov_stats, phenology, trait_models;
                 bathy_mig = bathy_mig, disp_diag = disp_diag, bio_strat = bio_strat,
                 spatial_roses = spatial_roses, taxis_proj = taxis_proj,
-                smooth_events = smooth_events
+                smooth_events = smooth_events, eff_dispersal = eff_dispersal
             )
             push!(written_files, dash_html)
             isfile(dash_sidecar) && push!(written_files, dash_sidecar)

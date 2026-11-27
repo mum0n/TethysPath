@@ -731,7 +731,7 @@ function create_argparse_settings()::ArgParseSettings
         "--render-html"
             dest_name = "render_html"
             help = "Render the legacy interactive HTML dashboards (default off; " *
-                   "results inspection is documented in docs/TethysPathNotes.md)."
+                   "results inspection is documented in docs/snowcrab_movement_connectivity_research_document.md)."
             arg_type = Bool
         "--output-dir"
             dest_name = "output_dir"

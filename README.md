@@ -19,7 +19,7 @@ Discrete-space animal movement inference, conditioned Markov-bridge trajectory r
 - **Circuit-theoretic and regional connectivity**: Models the marine graph as a resistive network ($\mathbf{L}_C \mathbf{V} = \mathbf{I}_{\text{ext}}$) to locate low-degree current pinch-points, computes 1-year ($\mathbf{P}^{365}$) HSI-weighted regional transition probabilities across management areas, and evaluates exact mean first-passage times and multistate Cormack-Jolly-Seber survival/detection separation.
 - **Lakehouse persistence and dashboard export**: Writes Zarr checkpoints (`movement_checkpoint.zarr`, `movement_results_checkpoint.zarr`), diagnostic CSV tables, `TethysBio` movement parameter summaries (`movement_stats.toml`), and a self-contained multi-tab Leaflet HTML dashboard (`movement_dashboard.html`) to `lakehouse/TethysPath`.
 
-Mathematical formulations, phase specifications, and configuration parameters are documented in [docs/movement_analysis.md](docs/movement_analysis.md).
+Mathematical formulations, phase specifications, configuration parameters, checkpoint inspection snippets, and empirical snow crab results are consolidated in [docs/snowcrab_movement_connectivity_research_document.md](docs/snowcrab_movement_connectivity_research_document.md) (bibliography in [docs/references.bib](docs/references.bib)).
 
 ## Pipeline Stages
 
@@ -63,9 +63,10 @@ julia --project=. TethysPathRun.jl --config=configs/snowcrab.toml --resume=true
 julia --project=. TethysPathRun.jl --config=configs/snowcrab.toml --figures-only=true
 ```
 
-## Results Inspection and Notes
+## Documentation and Dashboard Deployment
 
-Instructions for loading Zarr checkpoints, inspecting posterior transition kernels, and querying exported tables are provided in [docs/TethysPathNotes.md](docs/TethysPathNotes.md). Local HTTP viewing and GitHub Pages deployment of `movement_dashboard.html` and `movement_dashboard.data.zz` are documented in [docs/github_pages.md](docs/github_pages.md). The biological and mathematical specification for Northwest Atlantic snow crab (*Chionoecetes opilio*) is given in [docs/snowcrab_movement_connectivity_research_document.md](docs/snowcrab_movement_connectivity_research_document.md).
+- **Research specification, pipeline reference, and Zarr checkpoint inspection**: [docs/snowcrab_movement_connectivity_research_document.md](docs/snowcrab_movement_connectivity_research_document.md) (references in [docs/references.bib](docs/references.bib)).
+- **Local HTTP viewing and GitHub Pages deployment** (`movement_dashboard.html` + `movement_dashboard.data.zz`): [docs/github_pages.md](docs/github_pages.md).
 
 
 ## GitHub serving:

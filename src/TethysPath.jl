@@ -152,6 +152,8 @@ export
     classify_liberty_interval,
     smooth_marine_polyline,
     reconstruct_all_event_trajectories,
+    compute_effective_dispersal_area,
+    export_effective_dispersal_csv,
     compute_advanced_diagnostics,
     execute_validation_analyses,
     run_movement_analysis,

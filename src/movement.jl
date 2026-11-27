@@ -5744,6 +5744,189 @@ function compute_corridor_canalization(
 end
 
 """
+    compute_effective_dispersal_area(loaded, kernels; horizon_steps=nothing, step_years=1/365.25) -> NamedTuple
+
+Compute the multi-step (default 1-year, `K = round(Int, 1 / step_years)`) destination
+Shannon entropy and effective dispersal area (Hill number of order 1) for every active
+marine unit under the fitted transition operator `P`:
+
+    H_K(u)     = -sum_v [P^K]_{u,v} * log([P^K]_{u,v})      (nats)
+    N_eff(u)   = exp(H_K(u))                                (effective marine cells)
+    A_eff(u)   = N_eff(u) * A_cell                          (km^2)
+    r_eff(u)   = sqrt(A_eff(u) / pi)                        (km)
+
+Inputs:
+- `loaded`: Domain NamedTuple (`W`, `mesh`, `land_mask`, optional `region_map`, `region_labels`).
+- `kernels`: Transition kernel NamedTuple containing `P_kernel`.
+- `horizon_steps`: Positive integer step horizon (`nothing` defaults to `max(1, round(Int, 1 / step_years))`).
+- `step_years`: Duration of one transition kernel step in years (`1 / 365.25` default).
+
+Outputs:
+NamedTuple `(horizon_steps, cell_area_km2, entropy_nats, effective_cells, effective_area_km2, effective_radius_km)`.
+"""
+function compute_effective_dispersal_area(
+    loaded::NamedTuple,
+    kernels::NamedTuple;
+    horizon_steps::Union{Nothing, Int} = nothing,
+    step_years::Real = 1.0 / 365.25
+)::NamedTuple
+    P_raw = kernels.P_kernel isa AbstractVector ? kernels.P_kernel[1] : kernels.P_kernel
+    P_sp = P_raw isa SparseMatrixCSC ? P_raw : sparse(Float64.(P_raw))
+    S = size(P_sp, 1)
+    land_mask = hasproperty(loaded, :land_mask) ? loaded.land_mask : nothing
+    marine_idx = land_mask === nothing ? collect(1:S) : findall(!, land_mask)
+    n_m = length(marine_idx)
+
+    K = horizon_steps === nothing ? max(1, round(Int, 1.0 / max(Float64(step_years), 1e-6))) : Int(horizon_steps)
+    K >= 1 || throw(DomainError(K, "horizon_steps must be >= 1."))
+
+    # Estimate hexagonal cell area A_cell = (sqrt(3)/2) * d_med^2 from median marine edge length
+    mesh = loaded.mesh
+    cents = if hasproperty(mesh, :centroids_lonlat) && !isempty(mesh.centroids_lonlat)
+        mesh.centroids_lonlat
+    elseif hasproperty(mesh, :centroids) && !isempty(mesh.centroids)
+        mesh.centroids
+    else
+        mesh.centroids_km
+    end
+    is_geo = _infer_coord_space(cents)
+    W_sp = loaded.W isa SparseMatrixCSC ? loaded.W : sparse(Float64.(loaded.W))
+    rows_w = rowvals(W_sp)
+    edge_dists = Float64[]
+    for u in marine_idx
+        c1 = cents[u]
+        for ptr in nzrange(W_sp, u)
+            v = rows_w[ptr]
+            v <= u && continue
+            (land_mask !== nothing && land_mask[v]) && continue
+            c2 = cents[v]
+            d_km = is_geo ?
+                haversine_distance(Float64(c1[1]), Float64(c1[2]), Float64(c2[1]), Float64(c2[2])) / 1000.0 :
+                hypot(Float64(c2[1]) - Float64(c1[1]), Float64(c2[2]) - Float64(c1[2]))
+            (isfinite(d_km) && d_km > 1e-6) && push!(edge_dists, d_km)
+        end
+    end
+    d_med = isempty(edge_dists) ? 8.660254 : median(edge_dists)
+    cell_area_km2 = 0.5 * sqrt(3.0) * d_med * d_med
+
+    entropy_nats = zeros(Float64, S)
+    eff_cells = zeros(Float64, S)
+    eff_area = zeros(Float64, S)
+    eff_radius = zeros(Float64, S)
+    n_m == 0 && return (
+        horizon_steps       = K,
+        cell_area_km2       = cell_area_km2,
+        entropy_nats        = entropy_nats,
+        effective_cells     = eff_cells,
+        effective_area_km2  = eff_area,
+        effective_radius_km = eff_radius,
+    )
+
+    P_m = Matrix{Float64}(P_sp[marine_idx, marine_idx])
+    for i in 1:n_m
+        rs = 0.0
+        @inbounds for j in 1:n_m
+            rs += P_m[i, j]
+        end
+        if rs > 0.0
+            inv_rs = 1.0 / rs
+            @inbounds for j in 1:n_m
+                P_m[i, j] *= inv_rs
+            end
+        else
+            P_m[i, i] = 1.0
+        end
+    end
+
+    # Binary matrix exponentiation: res = P_m^K
+    res = Matrix{Float64}(I, n_m, n_m)
+    base = P_m
+    exp_rem = K
+    while exp_rem > 0
+        if (exp_rem & 1) == 1
+            res = res * base
+        end
+        exp_rem >>= 1
+        if exp_rem > 0
+            base = base * base
+        end
+    end
+
+    for (mi, u) in enumerate(marine_idx)
+        rs = 0.0
+        @inbounds for j in 1:n_m
+            v_p = res[mi, j]
+            v_p > 0.0 && (rs += v_p)
+        end
+        if rs <= 0.0
+            entropy_nats[u] = 0.0
+            eff_cells[u] = 1.0
+        else
+            inv_rs = 1.0 / rs
+            h_u = 0.0
+            @inbounds for j in 1:n_m
+                q = res[mi, j] * inv_rs
+                if q > 1e-15
+                    h_u -= q * log(q)
+                end
+            end
+            h_u = max(0.0, h_u)
+            entropy_nats[u] = h_u
+            eff_cells[u] = exp(h_u)
+        end
+        eff_area[u] = eff_cells[u] * cell_area_km2
+        eff_radius[u] = sqrt(eff_area[u] / pi)
+    end
+
+    return (
+        horizon_steps       = K,
+        cell_area_km2       = cell_area_km2,
+        entropy_nats        = entropy_nats,
+        effective_cells     = eff_cells,
+        effective_area_km2  = eff_area,
+        effective_radius_km = eff_radius,
+    )
+end
+
+function export_effective_dispersal_csv(
+    eff::NamedTuple,
+    loaded::NamedTuple,
+    out_dir::AbstractString
+)::String
+    mkpath(out_dir)
+    out_file = joinpath(out_dir, "effective_dispersal_1yr.csv")
+    cents = hasproperty(loaded.mesh, :centroids_lonlat) ?
+        loaded.mesh.centroids_lonlat : loaded.mesh.centroids
+    lmask = hasproperty(loaded, :land_mask) ? loaded.land_mask : nothing
+    rmap  = hasproperty(loaded, :region_map) ? loaded.region_map : nothing
+    rlbls = hasproperty(loaded, :region_labels) ? loaded.region_labels : String[]
+
+    open(out_file, "w") do io
+        write(io, "unit,lon,lat,region,horizon_steps,entropy_nats,effective_cells,effective_area_km2,effective_radius_km\n")
+        for u in eachindex(eff.effective_area_km2)
+            (lmask !== nothing && lmask[u]) && continue
+            lon_u = round(Float64(cents[u][1]); digits = 5)
+            lat_u = round(Float64(cents[u][2]); digits = 5)
+            reg_lbl = if rmap !== nothing && u <= length(rmap) &&
+                         1 <= rmap[u] <= length(rlbls)
+                rlbls[rmap[u]]
+            else
+                "Unassigned"
+            end
+            write(io, string(
+                u, ",", lon_u, ",", lat_u, ",", reg_lbl, ",",
+                eff.horizon_steps, ",",
+                round(eff.entropy_nats[u]; digits = 4), ",",
+                round(eff.effective_cells[u]; digits = 2), ",",
+                round(eff.effective_area_km2[u]; digits = 1), ",",
+                round(eff.effective_radius_km[u]; digits = 2), "\n"
+            ))
+        end
+    end
+    return out_file
+end
+
+"""
     export_corridor_canalization_csv(canal, loaded, output_dir, params = (;)) -> String
 
 Exports spatial corridor entropy, effective lateral spread, and canalization metrics

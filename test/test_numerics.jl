@@ -260,9 +260,9 @@ include("test_fixtures.jl")
     @testset "Notes field-mapping contract" begin
         # Regression guard for the documentation's field mappings against the
         # checkpoint schema written by src/pipeline.jl. The textual contract
-        # entries must stay in lock-step with docs/TethysPathNotes.md;
+        # entries must stay in lock-step with docs/snowcrab_movement_connectivity_research_document.md;
         # the execution checks below run only when the checkpoint exists.
-        nb_path = joinpath(@__DIR__, "..", "docs", "TethysPathNotes.md")
+        nb_path = joinpath(@__DIR__, "..", "docs", "snowcrab_movement_connectivity_research_document.md")
         notebook_checks = [
             ("loaded.mesh.n_units", "mesh size read via loaded.mesh, not loaded"),
             ("count(!iszero,", "sparse/dense kernel active counting"),

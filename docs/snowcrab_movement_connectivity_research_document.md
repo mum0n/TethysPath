@@ -4,15 +4,10 @@ title: >
   Spatiotemporal Connectivity in Atlantic Canada: A Mechanistic Bayesian
   Advection-Diffusion and Probabilistic Network Framework
 subtitle: >
-  Integrating Acoustic Telemetry, Commercial Mark-Recapture, Conditioned Markov
-  Bridges, and Circuit Theory within TethysPath
+  Consolidated Research Specification, Technical Pipeline Reference, and
+  Empirical Synthesis for TethysPath.jl
 author: "TethysPath Group"
 date: "2026-11-26"
-status: >
-  Technical specification synchronized with the active `TethysPath` implementation
-  (`configs/snowcrab.toml`, `src/movement.jl`, `src/spatial_sources.jl`, and
-  `src/pipeline.jl`). See `docs/movement_analysis.md` and `docs/TethysPathNotes.md`
-  for CLI usage and Zarr checkpoint inspection.
 format:
   html:
     toc: true
@@ -26,130 +21,321 @@ format:
     toc: true
     number-sections: true
     latex-engine: lualatex
-bibliography: ../references.bib
-csl: ../chicago-author-date.csl
+bibliography: references.bib
 ---
 
 # Abstract
 
-Spatial redistribution, directional taxis, and cross-boundary demographic connectivity govern how benthic marine populations respond to exploitation and ocean warming. Snow crab (*Chionoecetes opilio*) supports major crustacean fisheries across the Scotian Shelf and Southern Gulf of St. Lawrence (NAFO Divisions 4VWX and 4T), yet harvest management remains partitioned into static Crab Fishing Areas (N-ENS, S-ENS, 4X, and CFA 19 / Area 12) whose boundaries do not coincide with bathymetric conduits.
+Spatial redistribution, habitat-directed taxis, and cross-boundary demographic exchange determine how benthic marine populations respond to exploitation and ocean warming. Snow crab (*Chionoecetes opilio*) supports major crustacean fisheries across the Scotian Shelf (NAFO Divisions 4VWX) and Southern Gulf of St. Lawrence (NAFO Division 4T), yet stock assessments remain partitioned into static Crab Fishing Areas (N-ENS, S-ENS, 4X, and CFA 19 / Southern Gulf) that treat administrative boundaries as demographically closed. This document consolidates the ecological framing, simplified model structure, underlying assumptions and weaknesses, empirical results, management implications, and technical pipeline reference of `TethysPath.jl`.
 
-This document specifies the discrete-space Bayesian movement and connectivity framework implemented in `TethysPath` for Northwest Atlantic snow crab, separating empirical encounter observables from model-based transition and trajectory representations:
-
-- **Shoreline-Constrained Marine Hexagonal Topology**: Discretization across ~3,487 active 5 km marine hexagonal units spanning the Scotian Shelf, Cabot Strait, CFA 19, and Southern Gulf of St. Lawrence (`25-350 m` benthic habitat band), with `1.25`-arcminute global ocean/lake raster masking, overland causeway/isthmus edge severing, enclosed inland-lake exclusion (e.g., Bras d'Or Lake), and radial shoreline clipping of coastal polygon vertices.
-- **Survey Suitability and Unsurveyed Diffusive Domains**: Coupling of empirical Scotian Shelf Habitat Suitability Index (HSI) fields with a homogeneous baseline (`0.50`) across unsurveyed CFA 19 and Southern Gulf waters (`inputs/cfagulf.dat`), ensuring that movement across unsurveyed shelves reduces locally to two-dimensional marine diffusion rather than collapsing onto artificial narrow channels.
-- **Modality-Stratified Bayesian Transition Kernels**: Estimation of discrete convex mixture operators $\mathbf{P} = (1 - \rho)[(1 - \alpha)\mathbf{T}_{\text{diff}} + \alpha\mathbf{A}(H)] + \rho\mathbf{I}$ in `Turing.jl`, both pooled and stratified between fishery-independent Ocean Tracking Network acoustic arrays (`datasource == "otn"`) and commercial pot-trap recaptures (`datasource == "bio"`, corrected for spatial trap-haul effort).
-- **Conditioned Markov-Bridge Routing and Marine B-Spline Smoothing**: Exact forward-backward Markov bridge trajectory sampling conditioned on observed endpoints $(u_{\text{rel}}, u_{\text{rec}}, k)$, paired with raster-guarded quadratic B-spline smoothing across every mark-recapture event stratified by time at liberty (`< 1 month` to `>= 4 yr`).
-- **Spatial Directional Roses, Environmental Taxis, and Corridor Canalization**: Evaluation of $100 \times 100\text{ km}$ compass bearing roses and Rayleigh tests anchored at marine coordinates, displacement vector projections onto local bathymetric ($\nabla z$), thermal ($\nabla T$), and habitat ($\nabla\text{HSI}$) gradients, outgoing step entropy $H(u) \in [0, 1]$, and spatial corridor canalization $K(u) \in [0, 1]$.
-- **Circuit Pinch-Points and Annual Regional Exchange**: Kirchhoff current-density analysis ($\mathbf{L}_C\mathbf{V} = \mathbf{I}_{\text{ext}}$) and 1-year ($\mathbf{P}^{365}$) HSI-weighted transition probability matrices across N-ENS, S-ENS, 4X, and CFA 19 / Southern Gulf.
+Across $N = 5{,}066$ mark-recapture and acoustic telemetry encounter intervals ($3{,}489$ unique individuals) mapped onto $3{,}487$ shoreline-clipped 5 km marine hexagonal units (`25-350 m` bathymetric band), movement is modeled by a single daily discrete-space Markov transition matrix $\mathbf{P} \in [0, 1]^{S \times S}$ decomposing each daily step into three mutually exclusive outcomes: staying in place ($\rho$), diffusing isotropically to a marine neighbour ($(1 - \rho)(1 - \alpha)$), or moving preferentially up local Habitat Suitability Index (HSI) gradients ($(1 - \rho)\alpha$, weighted by $\exp(\gamma\Delta\text{HSI})$). Pooled inference yields strong habitat-guided advection ($\hat{\alpha} = 0.821$, 95% CI $[0.764, 0.856]$; $\hat{\gamma} = 4.42$, $[3.74, 4.98]$) and high daily site residence ($\hat{\rho} = 0.733$, $[0.625, 0.836]$). Stratifying fishery-independent Ocean Tracking Network acoustic detections (`n = 1,559`, `84.4%` stationary within 5 km) from effort-weighted commercial pot-trap recaptures (`n = 3,507`, `20.0%` stationary) isolates gear-sampling bias while preserving consistent habitat-directed advection ($\hat{\alpha} = 0.860$ vs. $0.822$). Empirically, `62.7%` of non-stationary displacements align along local isobaths, cross-slope movement reverses seasonally from winter upslope ($\overline{\cos\psi_z} = -0.218$, $p = 0.003$) to summer-autumn downslope ($p < 10^{-5}$), and `14` of `19` spatial $100 \times 100\text{ km}$ compass bearing sectors show significant local topographic steering ($p < 0.05$) obscured by shelf-wide circular averages ($\bar{R} = 0.113$). Annual ($\mathbf{P}^{365}$) HSI-weighted transition matrices indicate asymmetric cross-boundary exchange—including `13.3%` (`[11.1%, 16.0%]`) annual export from N-ENS into S-ENS, `4.6%` (`[4.0%, 5.7%]`) from N-ENS into CFA 19 / Southern Gulf, and `16.3%` (`[12.9%, 19.4%]`) from 4X into S-ENS—highlighting both the demographic openness of management zones and the structural limitations that must be addressed in next-generation spatial assessments.
 
 ---
 
-# 1. Ecological Context and Spatial Frame of Reference
+# 1. Introduction
 
-## 1.1. Thermal Stenothermy and Bathymetric Partitioning
+## 1.1. Ecological Context and Management Scale
 
-Snow crab (*Chionoecetes opilio*, Brachyura: Oregoniidae) is a cold-water stenotherm whose benthic distribution and metabolic scope are bounded by bottom temperature and seabed geomorphology [@Foyle_et_al_1989; @Kuhn_Choi_2011; @Choi_et_al_2022]:
+The snow crab (*Chionoecetes opilio*, Brachyura: Oregoniidae) is a cold-water stenotherm distributed across continental shelves of the North Pacific, Bering Sea, Arctic Ocean, and Northwest Atlantic [@Comeau_et_al_1998; @Choi_2011]. Across the Scotian Shelf (NAFO Divisions 4VWX), the Laurentian Channel, and the Southern Gulf of St. Lawrence (NAFO Division 4T), snow crab serves both as a dominant benthic predator-scavenger following the early-1990s demersal finfish regime shift [@Choi_et_al_2004; @Choi_et_al_2005a; @Bundy_et_al_2004] and as the foundation of regional crustacean fisheries [@Choi_Zisserson_2011; @Cadigan_et_al_2017; @DFO_2022_SnowCrab].
 
-- **Core Thermal Envelope**: Peak post-settlement densities occur between $-1.0^\circ\text{C}$ and $3.0^\circ\text{C}$ within the Cold Intermediate Layer (CIL) supplied by winter convection and Labrador Current / Gulf outflow [@Choi_2011; @Choi_et_al_2022]. Bottom temperatures above $6.0\text{--}7.0^\circ\text{C}$ elevate metabolic maintenance costs and restrict prolonged occupancy [@Foyle_et_al_1989].
-- **Bathymetric Structure (`25-350 m`)**: Across the Scotian Shelf, shallow offshore banks (`< 60 m`; Sable Island, Western, and Banquereau Banks) separate cold interior basins (`150-300 m`; Emerald, Misaine, and Roseway Basins) linked by cross-shelf troughs, submarine gullies, and the Laurentian Channel margin [@Zwanenburg_et_al_2002; @Choi_et_al_2005a].
-- **Ontogeny and Terminal Molt**: Determinate growth culminates in a terminal molt to morphometric maturity [@Comeau_Conan_1992; @Sainte-Marie_1993], followed by progressive carapace aging from clean hard shell (CC 2) through intermediate/mature hard shell (CC 3-4) to senescent shell (CC 5). Large hard-shelled males undertake seasonal and ontogenetic redistributions across basin slopes, whereas multiparous females exhibit higher spatial site fidelity [@Sainte-Marie_Hazel_1992; @Tremblay_et_al_2007; @Boudreau_et_al_2011].
+Benthic distribution, metabolism, and reproductive timing are constrained by bottom temperature and seabed geomorphology [@Foyle_et_al_1989; @Kuhn_Choi_2011; @Choi_et_al_2022]:
 
-## 1.2. Observational Modalities vs. Model-Based Representations
+- **Thermal constraints**: Peak post-settlement densities occupy $-1.0^\circ\text{C}$ to $3.0^\circ\text{C}$ within the Cold Intermediate Layer (CIL) [@Choi_2011; @Choi_et_al_2022]. Bottom temperatures exceeding $6.0\text{--}7.0^\circ\text{C}$ elevate maintenance respiration and reduce scope for growth [@Foyle_et_al_1989], while embryonic brooding shifts from a 1-year cycle in warmer waters ($> 2.0^\circ\text{C}$) to a 2-year cycle below $1.0^\circ\text{C}$ [@Sainte_Marie_1993; @Webb_et_al_2007; @Kuhn_Choi_2011].
+- **Bathymetric and substrate structure**: Shallow offshore banks (`< 60 m`; Banquereau, Sable Island, and Western Banks) separate cold depositional basins (`150-300 m`; Emerald, Misaine, and Roseway Basins) linked by cross-shelf troughs, submarine canyons, and the Laurentian Channel margin [@Zwanenburg_et_al_2002; @Choi_et_al_2005a]. Early benthic instars settle on structurally complex gravel and cobble substrates [@Sainte_Marie_Lafrance_2002; @Comeau_et_al_1998], whereas adolescents and adults redistribute across deeper mud and silt basins [@Comeau_Conan_1992].
+- **Ontogeny and sexual dimorphism**: Determinate growth ends in a terminal molt to morphometric maturity [@Comeau_Conan_1992; @Elner_Beninger_1995], followed by carapace condition (CC) progression from clean hard shell (CC 2) through mature hard shell (CC 3-4) to senescent shell (CC 5). Large hard-shelled males undertake seasonal foraging and mating redistributions along basin slopes, whereas egg-bearing females maintain narrower spatial ranges [@Sainte_Marie_Hazel_1992; @Tremblay_et_al_2007; @Boudreau_et_al_2011].
 
-Empirical encounter data comprise two distinct observation processes whose sampling biases must not be conflated with underlying biological movement:
+Despite continuous benthic habitat across deep channels, commercial management partitions the resource into discrete administrative zones: Northern Eastern Nova Scotia (N-ENS; CFAs 20-22), Southern Eastern Nova Scotia (S-ENS; CFAs 23-24), Southwestern Nova Scotia (CFA 4X), and Southern Gulf of St. Lawrence / Western Cape Breton (CFA 19 / Area 12) [@Choi_2020; @DFO_2022_SnowCrab; @Cadigan_et_al_2017]. Treating these polygons as closed populations risks misattributing immigration or emigration to local recruitment or fishing mortality.
 
-- **Acoustic Receiver Detections (`OTN`)**: Fixed Ocean Tracking Network hydrophone lines and gates detect acoustically tagged crabs independently of commercial fishing seasons, recording high-frequency residency and directional crossings near receiver arrays.
-- **Commercial Pot-Trap Recaptures (`BIO`)**: T-bar anchor tags returned by the commercial fishery span multi-year liberties across broad shelf extents, but recapture locations are conditioned on the spatiotemporal distribution of pot-haul effort.
+## 1.2. Separating Empirical Observables from Model Representations
 
-Endpoints $(u_{\text{rel}}, u_{\text{rec}})$ and elapsed durations $\Delta t$ are direct empirical observables. Intermediate trajectories, nodal transit densities, step entropies, and annual regional transition matrices are model-based expectations conditioned on the discrete marine graph and fitted Markov transition kernel. Accordingly, endpoint-derived straight-line ratios (such as unconditioned chord-to-path "tortuosity" or behavioural bout labels inferred without continuous intermediate fixes) are omitted in favour of conditioned Markov-bridge ensembles and explicit gradient projections.
+Quantitative movement analysis requires keeping empirical observations distinct from model-dependent constructs:
 
----
+- **Empirical observables**: Mark/release and recapture coordinates, elapsed time between mark and recapture ($\Delta t$), carapace width (CW), carapace condition (CC), sex/maturity state, and observation modality—specifically fishery-independent Ocean Tracking Network (`OTN`) acoustic receiver detections versus commercial pot-trap (`BIO`) tag returns.
+- **Model-dependent representations**: Discrete-time Markov transition probabilities $\mathbf{P}$, conditioned forward-backward Markov-bridge trajectories, locally smoothed marine splines, outgoing step entropy $H(u)$, corridor canalization $K(u)$, Kirchhoff current density $J(u)$, and multi-step regional exchange matrices $\mathbf{P}^{365}$.
 
-# 2. Marine Spatial Discretization and Boundary Invariants
-
-## 2.1. Shoreline-Clipped 5 km Hexagonal Lattice
-
-The spatial domain spans NAFO Divisions 4VWX and southern 4T on a planar 5 km hexagonal tessellation (~3,487 active marine units within the `25-350 m` habitat band). Preventing artificial overland routing across narrow Maritime barriers (Canso Causeway, Chignecto Isthmus, Prince Edward Island, Magdalen Islands, Sable Island, and Bras d'Or Lake in central Cape Breton) requires four coupled geometric constraints:
-
-- **Signed Elevation Transfer**: Bathymetric elevation $z_{\text{elev}} \in \mathbb{R}$ (positive on land, negative in water) is area-transferred prior to zero-clamping so coastal units overlapping steep shorelines are not averaged with zero-clamped land into synthetic `30-60 m` channels.
-- **High-Resolution Ocean/Lake Raster Masking (`land_mask_from_global_mask`)**: Evaluates the `1.25`-arcminute (`~1.6-2.3 km`) GMT/basemap raster (`resolution = "h"`), classifying all non-zero codes (`1` = terrestrial land, `>= 2` = inland lakes/ponds) as non-ocean (`true`) and screening interior half-radius polygon vertices.
-- **Overland Edge Severing and Pocket Exclusion (`sever_raster_land_edges!`, `mask_enclosed_inland_pockets!`)**: Tests 49 interior points along each adjacency chord $\overline{\mathbf{c}_u \mathbf{c}_v}$ against the `1.25`-arcminute raster and supplementary GeoJSON polygons (`inputs/sable_island.geojson`), zeroing any edge intersecting non-ocean pixels:
-
-$$W_{\text{marine}, uv} = \begin{cases} W_{uv} & \text{if } u, v \in \mathcal{M} \text{ and } \overline{\mathbf{c}_u \mathbf{c}_v} \subset \Omega_{\text{ocean}}, \\ 0 & \text{otherwise}, \end{cases}$$
-
-and masking enclosed inland pockets smaller than $2\%$ of the primary ocean component.
-- **Shoreline Polygon Clipping (`clip_polygons_to_ocean!`)**: Retracts individual coastal hexagon vertices radially toward their marine centroid $(\mathbf{c}_u)$ wherever the vertex ray enters non-ocean pixels, ensuring rendered choropleth cells conform to the coastline.
-
-## 2.2. Surveyed vs. Unsurveyed Habitat Suitability
-
-Within the Scotian Shelf trawl survey domain (`inputs/sppoly.jld2`), empirical monthly and climatological HSI fields (`inputs/hsi.zarr`) supply local suitability $H_u \in [0, 1]$. Across CFA 19 and the Southern Gulf of St. Lawrence (`inputs/cfagulf.dat`), comparable trawl-derived HSI surfaces are unavailable in the Maritimes store. Assigning a uniform baseline $H_u = 0.50$ across all in-depth (`25-350 m`) marine units inside `cfagulf.dat` yields $\Delta H_{uv} = H_v - H_u = 0$ between unsurveyed neighbours, so local transitions reduce to unbiased marine diffusion ($A_{uv}(H) = T_{\text{diff}, uv}$) rather than funneling trajectories along artificial boundary artifacts. Out-of-depth marine units under `depth_barrier_mode = :hsi_only` receive $H_u \le h_{\text{floor}} = 0.01$, discouraging traversal over shallow banks (`< 25 m`) or deep abyssal slopes (`> 350 m`) without severing topological reachability.
+Because mark-recapture data supply endpoints without intermediate positional fixes, unconditioned chord-to-path "tortuosity" ratios, endpoint-inferred behavioural bouts, and deterministic shortest-path (`A*`) routes conflate geometric lattice artifacts with animal behaviour. `TethysPath.jl` replaces those heuristics with a single coherent probabilistic movement operator on a shoreline-constrained marine graph, paired with direct empirical gradient projections and modality-stratified Bayesian inference.
 
 ---
 
-# 3. Statistical Movement Kernel and Conditioned Routing
+# 2. Data and Marine Spatial Discretization
 
-## 3.1. Convex Mixture Markov Operator
+## 2.1. Telemetry and Habitat Inputs
 
-At daily time resolution ($\delta t = 1/365.25\text{ yr}$), single-step movement on the marine graph is governed by the sparse row-stochastic transition matrix $\mathbf{P} \in [0, 1]^{S \times S}$:
+The Scotian Shelf and Southern Gulf configuration (`configs/snowcrab.toml`) ingests three primary inputs consolidated under `inputs/`:
 
-$$\mathbf{P} = (1 - \rho)\bigl[(1 - \alpha)\mathbf{T}_{\text{diff}} + \alpha \mathbf{A}(H)\bigr] + \rho \mathbf{I},$$
+- **Mark-recapture and acoustic encounters (`inputs/tagging.jld2`)**: Yields $N = 5{,}066$ valid marine encounter intervals across $3{,}489$ unique individuals after excluding $302$ records with inverted dates (recapture preceding release) and $17$ records with unreachable coordinate/datum errors. Records partition into $n = 1{,}559$ acoustic receiver detections (`OTN`, $173$ tags) and $n = 3{,}507$ commercial pot-trap recaptures (`BIO`, $3{,}316$ tags).
+- **Survey Habitat Suitability Index (`inputs/hsi.zarr`, `inputs/sppoly.jld2`)**: Supplies $324$ monthly and climatological HSI slices across the surveyed Scotian Shelf footprint.
+- **Management region and shoreline boundaries**: Regional polygons (`inputs/cfanorth.dat`, `inputs/cfasouth.dat`, `inputs/cfa4x.dat`, `inputs/cfagulf.dat`) define `N-ENS`, `S-ENS`, `4X`, and `CFA19 / S.Gulf`, supplemented by `inputs/sable_island.geojson` and the GMT/basemap `1.25`-arcminute (`"h"`) global ocean/lake raster.
 
-where $T_{\text{diff}, uv} = W_{\text{marine}, uv} / \sum_{w} W_{\text{marine}, uw}$ is the isotropic topological random walk and $A_{uv}(H) = W_{\text{marine}, uv}\exp(\gamma(H_v - H_u)) / \sum_w W_{\text{marine}, uw}\exp(\gamma(H_w - H_u))$ is the softmax habitat-taxis kernel. Parameters $(v, D, \gamma)$ are sampled in `Turing.jl` under:
+## 2.2. Shoreline-Constrained 5 km Hexagonal Lattice
 
-$$\alpha = \frac{v}{v + D + \epsilon}, \qquad \rho = \frac{1}{1 + v + D + \epsilon}, \qquad \mathcal{L}(v, D, \gamma) = \prod_{i=1}^{N} \bigl[\mathbf{P}^{k_i}\bigr]_{u_{\text{rel}, i},\, u_{\text{rec}, i}},$$
+Discretizing Maritime Canada at 5 km hexagonal circumradius ($8{,}003$ initial units before depth and footprint pruning; $3{,}487$ active marine units retained within `25-350 m`) requires strict topological constraints to prevent artificial overland shortcuts across Canso Causeway, Chignecto Isthmus, Prince Edward Island, Sable Island, and Bras d'Or Lake in central Cape Breton:
 
-with separate stratified fits (`fit_datasource_stratified_kernels`) isolating fishery-independent acoustic detections (`OTN`) from effort-weighted commercial pot recaptures (`BIO`).
+- **Signed elevation transfer**: Bathymetric elevation $z_{\text{elev}} \in \mathbb{R}$ (positive on land, negative in water, from ETOPO 2022) is area-transferred onto fine hexagons prior to zero-clamping so terrestrial elevations do not average with adjacent deep channels into artificial shallow marine cells.
+- **High-resolution ocean/lake raster masking (`land_mask_from_global_mask`)**: Evaluates the `1.25`-arcminute (`~1.6-2.3 km`) `"h"` global mask, classifying all non-zero raster codes (`1` = terrestrial land, `>= 2` = inland lakes and ponds) as non-marine (`true`) and screening interior half-radius polygon vertices (`2,225 / 8,003` units masked).
+- **Overland edge severing and enclosed-pocket exclusion (`sever_raster_land_edges!`, `mask_enclosed_inland_pockets!`)**: Tests 49 interior checkpoints along every adjacency chord $\overline{\mathbf{c}_u\mathbf{c}_v}$ and zeros edges intersecting non-ocean pixels (`15` overland/isthmus edges severed):
 
-## 3.2. Conditioned Markov Bridges and Locally Smoothed All-Event Trajectories
+$$W_{\text{marine}, uv} = \begin{cases} W_{uv} & \text{if } u, v \in \mathcal{M} \text{ and } \overline{\mathbf{c}_u\mathbf{c}_v} \subset \Omega_{\text{ocean}}, \\ 0 & \text{otherwise}, \end{cases}$$
 
-Given an observed transition from $u_{\text{rel}}$ to $u_{\text{rec}}$ over $K$ daily steps, the conditioned Markov bridge samples interior states sequentially from the exact forward-backward conditional distribution:
+followed by masking enclosed inland lake/lagoon components smaller than $2\%$ of the primary marine component (`105` enclosed units masked, eliminating Bras d'Or Lake shortcuts through Cape Breton).
+- **Radial shoreline clipping (`clip_polygons_to_ocean!`)**: Retracts individual coastal hexagon vertices radially toward their marine centroid wherever a vertex ray enters non-ocean pixels (`196` coastal hexagons clipped), guaranteeing zero polygon vertices protruding onto land.
 
-$$\mathbb{P}(X_\tau = v \mid X_{\tau-1} = u, X_K = u_{\text{rec}}) = \frac{P_{uv}\, b_{K-\tau+1}(v)}{\sum_{w} P_{uw}\, b_{K-\tau+1}(w)}, \qquad \mathbf{b}_{r+1} = \frac{\mathbf{P}\mathbf{b}_r}{\|\mathbf{P}\mathbf{b}_r\|_1}, \quad \mathbf{b}_1 = \mathbf{e}_{u_{\text{rec}}}.$$
+## 2.3. Survey Suitability vs. Unsurveyed Diffusive Domains
 
-In homogeneous-HSI domains ($\Delta H = 0$), this operator samples genuine two-dimensional diffusive Brownian bridges across open marine shelves; across heterogeneous Scotian Shelf basins, positive $\gamma$ concentrates bridge mass along cold, high-suitability troughs.
-
-To visualize movement structure across the complete encounter dataset ($N \approx 5{,}066$ events) without discrete $60^\circ$ hexagonal corner artifacts, `reconstruct_all_event_trajectories` shares the backward cascade $\{\mathbf{b}_r\}$ across events terminating at each recapture unit and applies two-pass Chaikin quadratic B-spline subdivision (`smooth_marine_polyline`), accepting each corner shortcut $\overline{\mathbf{b}_{\text{in}}\mathbf{a}_{\text{out}}}$ only when all interior raster substeps remain strictly oceanic (`data == 0`). Events are stratified by elapsed time at liberty (`< 1 month`, `1 mo - 1 yr`, `1 - 2 yr`, `2 - 3 yr`, `3 - 4 yr`, `>= 4 yr`) and rendered with interactive click-to-highlight path isolation.
-
----
-
-# 4. Spatial Orientation, Corridor Canalization, and Stock Connectivity
-
-## 4.1. Discretized $100 \times 100\text{ km}$ Compass Roses and Gradient Taxis
-
-Shelf-wide circular averages obscure local topographic steering around Cape Breton, Sable Bank, and Emerald Basin. `compute_spatial_bearing_roses` partitions non-stationary displacements into $100 \times 100\text{ km}$ planar cells, evaluating sector resultant length $\bar{R}_c = \|\frac{1}{n_c}\sum_{j \in c} (\cos\theta_j, \sin\theta_j)\|_2$, circular mean bearing $\bar{\theta}_c$, von Mises concentration $\hat{\kappa}_c$, and Rayleigh uniformity $Z_c = n_c \bar{R}_c^2$ ($p_c$), anchoring each SVG polar rose at the nearest occupied marine unit centroid on the map.
-
-Complementing geographic compass bearings, `analyze_gradient_taxis_projections` estimates local spatial gradients $\nabla f(u)$ ($f \in \{z, T, \text{HSI}\}$) across adjacent marine centroids via inverse-distance weighted least squares and projects unit displacement vectors $\hat{\mathbf{d}}_i$ onto $\nabla f(u_{\text{rel}, i}) / \|\nabla f(u_{\text{rel}, i})\|_2$ to test downslope ($\cos\psi_z > 0$), contour-following ($|\cos\psi_z| < \sin 25^\circ$), warmward ($\cos\psi_T$), and up-suitability ($\cos\psi_h$) movement.
-
-## 4.2. Outgoing Step Entropy, Canalization, and Kirchhoff Pinch-Points
-
-At each marine unit $u$ with marine degree $d_u \ge 2$, normalized non-self step entropy $H(u) = -(\log d_u)^{-1} \sum_{v \ne u} \tilde{P}_{uv}\log\tilde{P}_{uv} \in [0, 1]$ measures local directional dispersion, while normalized interior bridge passage $\tilde{C}(u) = \min(1, C(u) / P_{99}(C))$ measures empirical transit load. Their joint canalization index:
-
-$$K(u) = \sqrt{\tilde{C}(u)}\,\bigl(1 - 0.5\,H(u)\bigr) \in [0, 1],$$
-
-together with structural bottleneck centrality $B(u) = C_{\text{domain}}(u) / \max(1, d_u)$ and steady-state Kirchhoff current density $J(u)$ ($\mathbf{L}_C\mathbf{V} = \mathbf{I}_{\text{ext}}$), distinguishes constrained bathymetric corridors (Cabot Strait, St. Anns / Laurentian margin, and cross-shelf gullies) from broad diffusive banks and Gulf plains.
-
-## 4.3. Annual ($\mathbf{P}^{365}$) Management-Area Connectivity
-
-Single-day transition probabilities ($\mathbf{P}^1$) across broad administrative polygons are dominated by $> 99.9\%$ self-retention near interior cells and provide negligible demographic contrast. Promoting the daily operator to a 1-year horizon ($\mathbf{P}^{365}$) and weighting source units by local habitat suitability $H_u$ yields the annual regional exchange matrix across N-ENS, S-ENS, 4X, and CFA 19 / Southern Gulf:
-
-$$M_{ab}^{(1\text{ yr})} = \frac{\sum_{u \in R_a} H_u \sum_{v \in R_b} [\mathbf{P}^{365}]_{uv}}{\sum_{u \in R_a} H_u},$$
-
-propagated across posterior MCMC draws to report 95% credible intervals on annual retention and cross-boundary exchange.
+Inside the Scotian Shelf trawl survey footprint (`1,250` active surveyed units), empirical HSI fields $H_u \in [0, 1]$ drive habitat-gradient taxis. Across CFA 19 and the Southern Gulf of St. Lawrence (`2,237` active in-depth units inside `inputs/cfagulf.dat`), compatible Maritimes trawl-derived HSI surfaces do not exist. Rather than extrapolating narrow edge channels, unsurveyed in-depth marine units receive a homogeneous suitability baseline ($H_u = 0.50$). Because $\Delta H_{uv} = H_v - H_u = 0$ across homogeneous-HSI neighbours, the transition kernel reduces locally to two-dimensional marine diffusion across the Gulf shelf. Out-of-depth marine units (`depth < 25 m` or `depth > 350 m`) under `depth_barrier_mode = :hsi_only` retain graph connectivity with HSI floored at `hsi_ood_floor = 0.01`, discouraging traversal across warm shallow banks or abyssal slopes without artificially fragmenting contiguous shelf basins.
 
 ---
 
-# 5. Reproducible Execution and Artifacts
+# 3. Model Structure
 
-```julia
-using TethysPath
+At its core, `TethysPath.jl` is a **three-parameter discrete-space, discrete-time Markov chain** defined on the marine hexagonal graph $\mathcal{G} = (\mathcal{M}, \mathcal{E})$ at a daily clock ($\delta t = 1/365.25\text{ yr}$). Every downstream output—trajectories, corridors, step entropy, bottlenecks, and 1-year regional exchange—is derived directly from this single fitted transition matrix $\mathbf{P}$ rather than from separate statistical sub-models.
 
-# Execute full snow crab inference, diagnostics, and dashboard export
-cfg = load_config(config_path = "configs/snowcrab.toml")
-res = run_movement_analysis(cfg)
+## 3.1. The Daily Movement Rule
+
+Consider a snow crab located in marine cell $u \in \{1, \dots, S\}$ on day $t$, with navigable marine neighbours $\mathcal{N}(u) = \{v : W_{\text{marine}, uv} > 0\}$. Between day $t$ and day $t + 1$, exactly one of three mutually exclusive events occurs:
+
+1. **Stay in place** with probability $\rho \in (0, 1)$ (local site residence).
+2. **Diffuse randomly** with probability $(1 - \rho)(1 - \alpha)$, stepping uniformly to any adjacent marine cell $v \in \mathcal{N}(u)$ with probability $T_{\text{diff}, uv} = 1 / |\mathcal{N}(u)|$.
+3. **Move along the habitat gradient** with probability $(1 - \rho)\alpha$, stepping to neighbour $v \in \mathcal{N}(u)$ with softmax probability weighted by the local suitability difference $\Delta H_{uv} = H_v - H_u$:
+
+$$A_{uv}(H) = \frac{W_{\text{marine}, uv}\,\exp\bigl(\gamma (H_v - H_u)\bigr)}{\sum_{w \in \mathcal{N}(u)} W_{\text{marine}, uw}\,\exp\bigl(\gamma (H_w - H_u)\bigr)}.$$
+
+Combining these three events defines the $S \times S$ row-stochastic daily transition matrix $\mathbf{P}$ ($\sum_v P_{uv} = 1$):
+
+$$\mathbf{P} = \underbrace{\rho\,\mathbf{I}}_{\text{stay}} \;+\; (1 - \rho)\Bigl[\,\underbrace{(1 - \alpha)\,\mathbf{T}_{\text{diff}}}_{\text{random diffusion}} \;+\; \underbrace{\alpha\,\mathbf{A}(H)}_{\text{habitat-guided taxis}}\,\Bigr].$$
+
+This formulation is the discrete-graph analogue of a continuous Advection-Diffusion-Reaction (ADR) partial differential equation [@Turchin_1998; @Wikle_2003], guaranteeing non-negativity, exact probability conservation, and zero overland leakage on arbitrary irregular coastlines. When $\gamma > 0$, movement biases toward higher-suitability neighbours; when $\gamma = 0$ or across homogeneous-HSI waters ($\Delta H_{uv} = 0$), $\mathbf{A}(H) = \mathbf{T}_{\text{diff}}$ and movement simplifies automatically to an unbiased two-dimensional marine random walk.
+
+## 3.2. Parameterization, Priors, and Multi-Day Observation Model
+
+To keep priors physically interpretable and ensure $\alpha \in [0, 1]$ and $\rho \in (0, 1]$ without constrained simplex transforms, `Turing.jl` [@Gelman_et_al_2013] samples three unconstrained or truncated latent quantities $(v, D, \gamma)$:
+
+$$v \sim \mathcal{N}_{[0, 0.95]}(0.3, 0.2^2), \qquad D \sim \mathcal{N}_{[0, \infty)}(0.1, 0.2^2), \qquad \gamma \sim \mathcal{N}(1.0, 1.0^2),$$
+
+mapped deterministically to the kernel probabilities via `movement_alpha_rho`:
+
+$$\alpha = \frac{v}{v + D + \epsilon}, \qquad \rho = \frac{1}{1 + v + D + \epsilon}, \qquad \epsilon = 10^{-12}.$$
+
+| Symbol | Domain / Units | Physical Meaning |
+|:-------|:---------------|:-----------------|
+| $S$ | $3{,}487$ cells (`5 km` hex) | Active marine units in the `25-350 m` habitat band |
+| $\delta t$ | $1 / 365.25\text{ yr}$ (`1 day`) | Discrete transition clock of $\mathbf{P}$ |
+| $H_u$ | $[0, 1]$ (dimensionless) | Local Habitat Suitability Index (`0.50` in unsurveyed `cfagulf.dat`, `<= 0.01` out-of-depth) |
+| $v, D$ | $[0, 0.95]$, $[0, \infty)$ | Latent advective and diffusive rate parameters |
+| $\alpha$ | $[0, 1]$ | Fraction of departing movement governed by habitat gradient vs. isotropic diffusion |
+| $\rho$ | $(0, 1]$ | Daily probability of remaining in the current 5 km cell |
+| $\gamma$ | $\mathbb{R}$ | Softmax sensitivity to $\Delta H_{uv} = H_v - H_u$ (inverse temperature $1/\gamma$ in `TethysBio`) |
+| $w_{\text{eff}}(u)$ | $[0.05, 1]$ | Smoothed relative commercial pot-trap effort weight (`BIO` stratum only) |
+
+For an individual marked in cell $u_{\text{rel}, i}$ and recaptured $k_i$ days later in cell $u_{\text{rec}, i}$, summing over all possible unobserved intermediate paths of length $k_i$ reduces analytically to the $(u_{\text{rel}, i}, u_{\text{rec}, i})$ entry of the $k_i$-step matrix power $\mathbf{P}^{k_i}$ (computed by sparse forward vector iteration $\mathbf{p}_{t+1} = \mathbf{P}^\top \mathbf{p}_t$ via `kstep_transition_cache`):
+
+$$u_{\text{rec}, i} \mid u_{\text{rel}, i}, k_i \;\sim\; \operatorname{Categorical}\!\Bigl(\bigl[\mathbf{P}^{k_i}\bigr]_{u_{\text{rel}, i},\, :}\Bigr), \qquad \log \mathcal{L}(v, D, \gamma) = \sum_{i=1}^{N} \log \bigl[\mathbf{P}^{k_i}\bigr]_{u_{\text{rel}, i},\, u_{\text{rec}, i}}.$$
+
+In the modality-stratified analysis (`fit_datasource_stratified_kernels!`), acoustic detections (`OTN`) use the unweighted transition likelihood above, whereas commercial trap recaptures (`BIO`) weight destination probabilities by the local trap-effort offset $w_{\text{eff}}(u)$ to account for non-uniform fleet coverage:
+
+$$\mathbb{P}_{\text{bio}}(Y = u_{\text{rec}} \mid X_0 = u_{\text{rel}}, k) = \frac{w_{\text{eff}}(u_{\text{rec}})\, [\mathbf{P}^k]_{u_{\text{rel}}, u_{\text{rec}}}}{\sum_{u=1}^S w_{\text{eff}}(u)\, [\mathbf{P}^k]_{u_{\text{rel}}, u}}.$$
+
+Posterior draws are generated via prior-scaled random-walk Metropolis-Hastings (`movement_sampler`, proposal width `mh_proposal_scale * prior_sd`), and model fit is evaluated by posterior predictive Kullback-Leibler divergence $\mathrm{KL}(p_{\text{obs}} \parallel p_{\text{pred}}^{(s)})$ [@Kullback_Leibler_1951].
+
+## 3.3. Unified Derived Operators (From $\mathbf{P}$ to Trajectories, Corridors, and Connectivity)
+
+Once $\mathbf{P}$ is estimated, every spatial diagnostic follows directly from the same operator:
+
+```text
+                    Fitted Daily Transition Matrix P (S x S)
+                                       |
+       +---------------+---------------+---------------+---------------+
+       |               |               |               |               |
+       v               v               v               v               v
+  Conditioned      Step Entropy     Structural      Annual Matrix   Forward IBM
+  Markov Bridge    & Canalization   Bottlenecks     P^365 (HSI-     Agent Space
+  & 5-Knot Spline  H(u), K(u)       B(u) = C/deg    Weighted)       Use (:agent)
 ```
 
-All outputs are persisted to `lakehouse/TethysPath/`, including Zarr checkpoints (`movement_checkpoint.zarr`, `movement_results_checkpoint.zarr`), `movement_dashboard.html`, `movement_stats.toml`, and diagnostic CSV summaries (`acoustic_vs_trap_inference.csv`, `spatial_bearing_roses_100km.csv`, `gradient_taxis_summary.csv`, `corridor_canalization_summary.csv`, `stock_connectivity_summary.csv`, `stock_connectivity_credible_intervals.csv`, and `movement_path_metrics.csv`).
+- **Conditioned Markov bridges (`predict_bridge_path`)**: Given observed endpoints $(u_{\text{rel}}, u_{\text{rec}})$ separated by $K$ steps, backward reachability vectors $\mathbf{b}_{r+1} = \mathbf{P}\mathbf{b}_r / \|\mathbf{P}\mathbf{b}_r\|_1$ ($\mathbf{b}_1 = \mathbf{e}_{u_{\text{rec}}}$) yield the exact conditional forward step distribution:
+
+$$\mathbb{P}(X_\tau = v \mid X_{\tau-1} = u, X_K = u_{\text{rec}}) = \frac{P_{uv}\, b_{K-\tau+1}(v)}{\sum_w P_{uw}\, b_{K-\tau+1}(w)}.$$
+
+- **Loop-free 5-knot marine splines (`reconstruct_all_event_trajectories`, `smooth_marine_polyline`)**: To visualize overall predicted trajectories across all $N = 5{,}066$ encounters without random-walk loops or $60^\circ$ hexagonal zig-zags, each conditioned bridge undergoes Lawler loop erasure [@Lawler_1980], three-pass marine-guarded moving-average relaxation, selection of five arc-length control knots (subdivided only when a chord intersects land), and centripetal ($\alpha = 0.5$) Catmull-Rom cubic spline interpolation [@Yuksel_et_al_2011] with raster shoreline damping.
+- **Step entropy, canalization, and structural bottlenecks (`compute_corridor_canalization`)**: For marine units with degree $d_u \ge 2$, normalized non-self step entropy $H(u) \in [0, 1]$ and interior bridge transit density $\tilde{C}(u) = \min(1, C(u)/P_{99}(C))$ define:
+
+$$H(u) = -\frac{1}{\log d_u}\sum_{v \ne u}\tilde{P}_{uv}\log\tilde{P}_{uv}, \qquad K(u) = \sqrt{\tilde{C}(u)}\,\bigl(1 - 0.5\,H(u)\bigr), \qquad B(u) = \frac{C_{\text{domain}}(u)}{\max(1, d_u)}.$$
+
+- **Kirchhoff circuit current density (`current_density_map`)**: Solves $\mathbf{L}_C\mathbf{V} = \mathbf{I}_{\text{ext}}$ with symmetric edge conductances $C_{uv} = W_{\text{marine}, uv}\sqrt{H_u H_v}$ on the 12-month mean HSI [@McRae_et_al_2008] to locate low-degree current pinch-points persistent in $\ge 80\%$ of interannual HSI realizations.
+- **1-year ($\mathbf{P}^{365}$) HSI-weighted regional connectivity (`compute_stock_connectivity_matrix`)**: Promotes $\mathbf{P}$ to 365 daily steps and aggregates across management polygons $R_a, R_b$ weighted by source suitability $H_u$:
+
+$$M_{ab}^{(1\text{ yr})} = \frac{\sum_{u \in R_a} H_u \sum_{v \in R_b} [\mathbf{P}^{365}]_{uv}}{\sum_{u \in R_a} H_u}, \qquad \sum_b M_{ab}^{(1\text{ yr})} = 1.$$
+
+- **Model-free empirical orientation diagnostics**: Complementing $\mathbf{P}$, `compute_spatial_bearing_roses` evaluates $100 \times 100\text{ km}$ circular mean bearings $\bar{\theta}_c$, resultant lengths $\bar{R}_c$, and Rayleigh uniformity $Z_c = n_c \bar{R}_c^2$ [@Mardia_Jupp_2000], while `analyze_gradient_taxis_projections` projects empirical unit displacement vectors $\hat{\mathbf{d}}_i$ directly onto local planar gradients $(\nabla z, \nabla T, \nabla\text{HSI})$.
+
+---
+
+# 4. Model Assumptions and Weaknesses
+
+Every simplifying assumption in Section 3 carries concrete diagnostic consequences that bound how inferred quantities should be interpreted:
+
+## 4.1. Behavioural and Dynamical Assumptions
+
+- **First-order Markov memorylessness ($\kappa = 0$ during MCMC)**: The fitted likelihood assumes daily transitions depend solely on the current cell $u$, omitting directional persistence (heading memory), individual home-range attraction, and latent behavioural state switching (e.g., resting vs. directed seasonal migration). Forward persistence $\kappa > 0$ is supported only in optional post-fit `:agent` projections.
+- **Time-homogeneous kernel during parameter estimation**: Although monthly `monthly_hsi` slices are used during Phase 4 trajectory reconstruction and Phase 2b agent projection, Phase 2 MCMC evaluates $\mathbf{P}^{k_i}$ using the static climatological mean `hsi_vec`. Because empirical cross-slope movement reverses between winter and summer-autumn (Section 5.2), a time-homogeneous operator averages over opposing seasonal forcings and likely understates seasonal directedness.
+- **Population-pooled movement parameters**: Fitting a single $(\alpha, \rho, \gamma)$ across all individuals pools mature males, mature egg-bearing females, and adolescents across carapace conditions (CC 1-5). Given established sexual dimorphism and terminal-molt behavioural differences [@Sainte_Marie_Hazel_1992; @Comeau_Conan_1992], pooled parameters represent a sample-weighted mixture (dominated by legal-sized commercial males) rather than a universal species constant.
+
+## 4.2. Observational and Statistical Weaknesses
+
+- **Spatial sampling bias and imperfect effort correction**: Acoustic detections (`OTN`) are confined to fixed receiver gates, producing `84.4%` apparent within-cell stationarity at 5 km resolution, whereas commercial pot recaptures (`BIO`) occur only where and when fishing fleets deploy traps. In the `BIO` likelihood, the effort proxy $\mathbf{w}_{\text{eff}}$ is smoothed from observed tag-capture density rather than independent commercial logbook trap-haul effort; unfished habitats with zero tag returns can therefore remain partially confounded with low visitation probability.
+- **Conditioning on observed recaptures without explicit mortality or tag loss**: The primary categorical likelihood models destination cell conditional on recapture, implicitly assuming spatially uniform natural mortality, fishing mortality, tag shedding, and reporting rates across management areas. Regions with higher harvest exploitation rates naturally generate more recaptures per unit resident abundance, which can bias inferred net directional flow toward heavily fished zones unless separated via the optional multistate Cormack-Jolly-Seber (`:recapture`) model.
+- **Low MCMC effective sample size (`ESS ~ 3`)**: Prior-scaled isotropic random-walk Metropolis-Hastings achieved stable acceptance (`0.54-0.62`) over `300-500` draws, but strong posterior correlation among $(v, D, \gamma)$ induces high autocorrelation. Posterior means are stable across runs, yet 95% credible intervals may understate tail uncertainty until adaptive-covariance proposals or gradient-based sampling (`NUTS` over cached sparse sensitivities) replace isotropic random-walk updates.
+
+## 4.3. Spatial and Environmental Limitations
+
+- **5 km spatial resolution floor**: Displacements shorter than ~5 km within a single hexagon register as stationary (`0` hops), compressing fine-scale foraging variability into $\rho$.
+- **Homogeneous suitability in unsurveyed waters (`cfagulf.dat`)**: Assigning uniform $H_u = 0.50$ across CFA 19 and the Southern Gulf prevents artificial boundary-channel artifacts and restores two-dimensional diffusion, but assumes spatially uniform benthic quality across `2,237` Gulf units where fine-scale thermal and substrate gradients certainly exist.
+- **Absence of direct thermal-gradient fields in the baseline survey-HSI run**: Because `configs/snowcrab.toml` sets `use_geodata_habitat = false` to preserve Maritimes trawl-survey `hsi.zarr`, direct bottom-temperature taxis ($\nabla T$) is not evaluated (`n_thermal = 0`). Thermal forcing enters only indirectly through its empirical correlation with survey HSI.
+
+---
+
+# 5. Empirical Results Sketch (Scotian Shelf and Southern Gulf Snow Crab)
+
+All summary quantities below derive from the full snow crab pipeline execution (`configs/snowcrab.toml`; $3{,}487$ marine units, `0` land/lake defects on the `1.25`-arcminute `"h"` mask, $N = 5{,}066$ encounters across $3{,}489$ tags).
+
+## 5.1. Pooled and Modality-Stratified Kernel Parameters
+
+| Stratum | Encounters (Tags) | % Stationary | Med. / Mean Disp. (km) | $\hat{\alpha}$ [95% CI] | $\hat{\rho}$ [95% CI] | $\hat{\gamma}$ [95% CI] | $D_{\text{eff}}$ ($\text{km}^2\,\text{yr}^{-1}$) |
+|:--------|:------------------|:-------------|:-----------------------|:------------------------|:----------------------|:------------------------|:-------------------------------------------------|
+| Pooled All | 5,066 (3,489) | 39.8% | 8.64 / 17.00 | 0.821 [0.764, 0.856] | 0.733 [0.625, 0.836] | 4.42 [3.74, 4.98] | 328.3 |
+| Acoustic Array (`OTN`) | 1,559 (173) | 84.4% | 0.00 / 2.49 | 0.860 [0.835, 0.879] | 0.698 [0.657, 0.769] | 2.72 [1.32, 3.54] | 288.2 |
+| Commercial Trap (`BIO`, effort-offset) | 3,507 (3,316) | 20.0% | 14.59 / 23.45 | 0.822 [0.804, 0.839] | 0.636 [0.591, 0.692] | 2.10 [1.85, 2.35] | 444.7 |
+
+Posterior predictive calibration across $20$ MCMC draws yields $\mathrm{KL}(p_{\text{obs}} \parallel p_{\text{pred}}) = 0.765\text{ nats}$ (`95% CI [0.718, 0.835]`). Calibrated `TethysBio` coupling parameters exported to `movement_stats.toml` report a 95th-percentile annual movement speed of $214.4\text{ km yr}^{-1}$ (`max_move_m_per_year = 214,391 m/yr`), median observed speed of $17.4\text{ km yr}^{-1}$, and softmax temperature $1/\hat{\gamma} = 0.226$.
+
+## 5.2. Bathymetric and Habitat-Gradient Taxis
+
+| Stratum | $n_{\text{bathy}}$ | Downslope $\overline{\cos\psi_z}$ ($p$) | Mean Downslope (km) | Along-Isobath % | $n_{\text{HSI}}$ | Up-HSI $\overline{\cos\psi_h}$ ($p$) |
+|:--------|:-------------------|:----------------------------------------|:--------------------|:----------------|:-----------------|:-------------------------------------|
+| All Non-Stationary | 3,049 | $+0.076$ ($3.2 \times 10^{-9}$) | $+1.27$ | 62.7% | 2,114 | $+0.262$ ($2.6 \times 10^{-67}$) |
+| Q1 (Winter) | 104 | $-0.218$ ($0.0030$) | $-15.01$ | 54.7% | 22 | $+0.370$ ($0.0184$) |
+| Q2 (Spring) | 932 | $+0.038$ ($0.1054$) | $-2.12$ | 62.3% | 788 | $+0.269$ ($1.1 \times 10^{-27}$) |
+| Q3 (Summer) | 1,358 | $+0.096$ ($3.2 \times 10^{-7}$) | $+2.24$ | 64.9% | 1,130 | $+0.229$ ($1.3 \times 10^{-28}$) |
+| Q4 (Autumn) | 655 | $+0.135$ ($1.6 \times 10^{-6}$) | $+6.68$ | 59.7% | 174 | $+0.431$ ($5.1 \times 10^{-16}$) |
+
+- **Contour-following and seasonal bathymetric reversal**: Nearly two-thirds (`62.7%`) of non-stationary movements track local isobaths rather than crossing steep depth gradients. Cross-slope components reverse seasonally from winter upslope displacement (`-15.0 km`, $p = 0.003$) to summer-autumn downslope redistribution (`+2.24` to `+6.68 km`, $p < 10^{-5}$).
+- **Persistent up-suitability taxis**: Movement toward higher survey HSI is positive and statistically decisive across all four seasons and legal male size classes (`CW 95-110 mm`: $+0.265$; `110-125 mm`: $+0.248$; `>= 125 mm`: $+0.196$; all $p < 10^{-6}$).
+
+## 5.3. Spatially Discretized 100 km Compass Bearing Structure
+
+While shelf-wide circular averaging yields a low resultant length ($\bar{R} = 0.113$), `14` of `19` spatial $100 \times 100\text{ km}$ sectors reject circular uniformity ($p < 0.05$). Opposing local regimes—which cancel when pooled—align cleanly with regional bathymetry:
+
+- **Southern Gulf / Magdalen Shallows**: Strong northward orientation at `47.4°N, 63.3°W` ($\bar{\theta} = 3.0^\circ$, $\bar{R} = 0.653$, $n = 60$, $p < 10^{-4}$) and `47.1°N, 62.5°W` ($\bar{\theta} = 359.1^\circ$, $\bar{R} = 0.502$, $n = 208$, $p < 10^{-4}$), paired with southward return flow further north (`48.2°N, 62.2°W`, $\bar{\theta} = 185.1^\circ$, $p = 0.0012$).
+- **Cabot Strait and Northeastern Cape Breton**: Southwestward to westward steering along the Laurentian Channel margin (`46.9°N, 60.1°W`: $\bar{\theta} = 237.2^\circ$, $\bar{R} = 0.582$; `47.3°N, 60.7°W`: $\bar{\theta} = 226.5^\circ$, $\bar{R} = 0.362$; `46.4°N, 59.7°W`: $\bar{\theta} = 272.7^\circ$, $\bar{R} = 0.301$; all $p < 10^{-4}$).
+- **Eastern and Outer Scotian Shelf**: East-southeast movement off Chedabucto / Canso (`45.4°N, 60.8°W`: $\bar{\theta} = 104.5^\circ$, $\bar{R} = 0.321$, $n = 331$, $p < 10^{-4}$) converging with northwestward movement from the outer shelf (`45.2°N, 58.4°W`: $\bar{\theta} = 308.9^\circ$, $\bar{R} = 0.436$, $p = 2 \times 10^{-5}$).
+
+## 5.4. Annual ($\mathbf{P}^{365}$) Regional Connectivity and Structural Bottlenecks
+
+| From \ To (1-Yr $\mathbf{P}^{365}$) | N-ENS [95% CI] | S-ENS [95% CI] | 4X [95% CI] | CFA19 / S.Gulf [95% CI] |
+|:------------------------------------|:---------------|:---------------|:------------|:------------------------|
+| **N-ENS** | 0.820 [0.783, 0.849] | 0.133 [0.111, 0.160] | 0.000 [0.000, 0.000] | 0.046 [0.040, 0.057] |
+| **S-ENS** | 0.006 [0.005, 0.008] | 0.955 [0.946, 0.964] | 0.039 [0.031, 0.046] | < 0.001 [0.000, 0.000] |
+| **4X** | 0.000 [0.000, 0.000] | 0.163 [0.129, 0.194] | 0.837 [0.806, 0.871] | 0.000 [0.000, 0.000] |
+| **CFA19 / S.Gulf** | 0.008 [0.005, 0.010] | < 0.001 [0.000, 0.000] | 0.000 [0.000, 0.000] | 0.992 [0.990, 0.995] |
+
+Domain-wide bridge aggregation across $350 / 1{,}432$ unique origin-destination pairs identifies `123 / 3,487` critical structural bottleneck units ($B(u) \ge 0.742$, peak transit density `40.5` tag-equivalents across `3,668` active directed edges), complemented by `317 / 3,487` robust Kirchhoff pinch-points ($P \ge 0.80$) concentrated along Cabot Strait, the St. Anns / Laurentian slope margin, and inter-basin shelf troughs.
+
+---
+
+# 6. Discussion and Implications
+
+## 6.1. Observation Modality vs. Biological Movement
+
+Contrasting `OTN` acoustic arrays with `BIO` commercial pot recaptures demonstrates why unstratified mark-recapture summaries must be interpreted cautiously. Acoustic receivers record frequent within-cell detections (`84.4%` stationary at 5 km resolution), pulling pooled residence upward, whereas commercial trap recaptures span multi-year intervals across broader fishing grounds (`20.0%` stationary, $D_{\text{eff}} = 444.7\text{ km}^2\,\text{yr}^{-1}$). Yet after incorporating an empirical trap-effort offset in the `BIO` likelihood, both modalities infer strongly directed habitat advection ($\hat{\alpha} \in [0.82, 0.86]$, $\hat{\gamma} > 2.0$), indicating that habitat-guided movement along cold bathymetric basins is a robust biological signal rather than a gear artifact.
+
+## 6.2. Implications for Stock Assessment and Fisheries Management
+
+- **Asymmetric source-sink bias in closed-area assessments**: Annual transition estimates indicate that N-ENS exports `13.3%` southward to S-ENS and `4.6%` (`127` observed cross-boundary tags) into CFA 19 / Southern Gulf, while 4X exports `16.3%` into S-ENS against `3.9%` return inflow. Closed-population biomass models applied separately to N-ENS or 4X will absorb net emigration into elevated apparent natural mortality or underestimated productivity, whereas S-ENS (`95.5%` retention plus net immigration from both flanks) receives an unmodeled demographic subsidy.
+- **Operational coupling to spatially explicit assessment (`TethysBio`)**: Exporting calibrated dispersal scales (`max_move_m_per_year = 214.4 km/yr`, softmax temperature `0.226`) in `movement_stats.toml` allows spatial stock-assessment models to replace ad-hoc diffusion priors with empirically bounded movement operators.
+- **Climate warming and corridor constriction**: Because `62.7%` of displacements follow bathymetric contours and track high-suitability cold troughs, warming of shallow banks (`< 60 m`) and contraction of the Cold Intermediate Layer are expected to compress snow crab redistribution into the `123` structural bottleneck units and `317` Kirchhoff pinch-points (Cabot Strait, St. Anns / Laurentian slope, and cross-shelf gullies). Protecting bottleneck corridors (including spatial refugia such as the St. Anns Bank Marine Protected Area) and avoiding concentrated harvest inside narrow inter-basin conduits preserves regional re-colonization capacity.
+- **Telemetry and tagging survey design**: Combining fishery-independent acoustic receiver gates positioned across identified pinch-points with commercial tagging paired to independent logbook trap-haul effort resolves the structural trade-off between `OTN` spatial coverage and `BIO` effort confounding, and directly enables joint survival-detection-movement separation (`:recapture`).
+
+---
+
+# 7. Conclusions
+
+1. A single three-parameter daily Markov operator ($\alpha, \rho, \gamma$) on a `1.25`-arcminute shoreline-constrained 5 km marine lattice unifies trajectory reconstruction, corridor canalization, Kirchhoff pinch-point detection, and annual regional exchange without overland or inland-lake routing artifacts (`0` land/lake defects across `3,487` marine units and `5,066` encounters).
+2. Empirical snow crab movement on the Scotian Shelf and Southern Gulf is strongly habitat-directed ($\hat{\alpha} \approx 0.82$, $\hat{\gamma} \approx 4.4$, up-HSI $\overline{\cos\psi_h} = +0.262$), predominantly contour-following (`62.7%` along-isobath), seasonally reversible across depth gradients (winter upslope vs. summer-autumn downslope), and locally steered by regional topography (`14 / 19` significant $100\text{ km}$ bearing sectors).
+3. Administrative Crab Fishing Areas are asymmetrically coupled at annual timescales (`N-ENS -> S-ENS: 13.3%`, `N-ENS -> CFA 19 / S.Gulf: 4.6%`, `4X -> S-ENS: 16.3%`). Future work should prioritize time-varying seasonal MCMC likelihoods, independent commercial effort offsets, adaptive-covariance or gradient-based samplers to raise MCMC `ESS`, and dedicated Southern Gulf HSI surfaces.
+
+---
+
+# Appendix A: TethysPath Pipeline, Configuration, and Checkpoint Reference
+
+## A.1. Six-Phase Execution Architecture
+
+```text
+[Phase 1] load_movement_data              -- Telemetry ingestion, 1.25' land/lake mask, edge severing,
+                                             shoreline polygon clipping, homogeneous cfagulf.dat HSI
+[Phase 2] fit_movement_models             -- Pooled & stratified OTN vs. BIO (effort-offset) RW-MH MCMC
+[Phase 3] extract_transition_kernels      -- Posterior P_kernel, movement_checkpoint.zarr, :agent projection
+[Phase 4] reconstruct_paths_and_diagnostics -- Conditioned Markov bridges (:bridge), corridors, bottlenecks B(u)
+[Phase 5] compute_advanced_diagnostics /  -- Kirchhoff circuit flow (:circuit), canalization K(u), 1-yr P^365
+          execute_validation_analyses        regional connectivity, KL PPC (:validation), :connectivity, :recapture
+[Phase 6] export_dashboards               -- 5-knot spline trajectories (all events), 100 km roses, gradient taxis,
+                                             movement_dashboard.html + .data.zz, movement_stats.toml, results Zarr
+```
+
+## A.2. CLI Usage and Key Configuration Parameters (`TethysPathConfig`)
+
+```powershell
+# Full snow crab pipeline from Phase 1
+julia --project=. TethysPathRun.jl --config=configs/snowcrab.toml
+
+# Resume from Phase 3 MCMC checkpoint (skip Phases 1-3)
+julia --project=. TethysPathRun.jl --config=configs/snowcrab.toml --resume=true
+
+# Regenerate HTML dashboard, .data.zz sidecar, and Phase 6 tables from full results checkpoint
+julia --project=. TethysPathRun.jl --config=configs/snowcrab.toml --figures-only=true
+```
+
+| Parameter | Default (`configs/snowcrab.toml`) | Description |
+|:----------|:----------------------------------|:------------|
+| `model_modes` | `[:telemetry, :agent]` | Active inference/simulation modes (`:telemetry`, `:telemetry_and_survey`, `:agent`) |
+| `land_mask_resolution` / `grid_minutes` | `"h"` / `1.25` | GMT/basemap ocean/lake raster tier and arc-minute spacing |
+| `hex_radius_km` / `depth_range` | `5.0` / `[25.0, 350.0]` | Hexagonal lattice circumradius (km) and benthic depth window (m) |
+| `depth_barrier_mode` / `hsi_ood_floor` | `:hsi_only` / `0.01` | Preserves marine connectivity while penalizing out-of-depth units via HSI |
+| `path_methods` / `max_paths` | `[:bridge]` / `300` | Conditioned Markov-bridge (`:bridge`) or Viterbi (`:viterbi`) routing |
+| `n_samples` / `n_warmup` / `mh_proposal_scale` | `500` / `100` / `0.05` | MCMC posterior draw count, warmup, and prior-scaled RW-MH step width |
+| `diagnostics` | `[:circuit, :bottlenecks, :validation]` | Post-fit diagnostics (plus optional `:bayesian_ensemble`, `:connectivity`, `:recapture`) |
+| `fpt_step_years` | `1 / 365.25` | Duration of one transition kernel step in years |
+| `region_labels` / `region_polygon_files` | `["N-ENS", "S-ENS", "4X", "CFA19 / S.Gulf"]` | Management polygons (`inputs/cfa*.dat`) for annual connectivity |
+| `output_dir` / `render_html` | `"../lakehouse/TethysPath"` / `true` | Lakehouse output store for Zarr checkpoints, CSVs, TOML, and dashboard |
+
+## A.3. Lakehouse Artifacts and Zarr Checkpoint Inspection
+
+Pipeline outputs written to `../lakehouse/TethysPath/` include:
+
+- `movement_checkpoint.zarr` (Phases 1-3) and `movement_results_checkpoint.zarr` (Phases 1-6).
+- `movement_dashboard.html` (`~69 KB` shell) and `movement_dashboard.data.zz` (`~663 KB` RFC 1950 zlib-compressed JSON sidecar; see [github_pages.md](github_pages.md) for local HTTP and GitHub Pages `gh-pages` deployment). The dashboard opens on **Smoothed Trajectories** (all $5{,}066$ events as loop-free `5`-knot marine splines colour-coded by time between mark and recapture, with green Mark/Release points, gold Recapture stars, movement-direction arrowheads, left-docked legends/controls, and click-map highlighting defaulting to `Nearest Marks / Releases`), followed by **Paths & HSI**, **Corridors**, **Directed Flux & Bottlenecks**, **Corridor Canalization**, **1-Yr Effective Dispersal** ($A_{\text{eff}}(u) = \exp(H(\mathbf{P}^{365}_{u,\cdot})) A_{\text{cell}}$ in $\text{km}^2$), **Compass Bearing Roses (100 km)**, **Circuit Flow**, **Agent Space-Use**, **Tessellation & Depth**, **Path Analysis & Diagnostics**, and **Posterior Predictive (PPC)**.
+- `movement_stats.toml`, `acoustic_vs_trap_inference.csv`, `gradient_taxis_summary.csv`, `spatial_bearing_roses_100km.csv`, `corridor_canalization_summary.csv`, `effective_dispersal_1yr.csv`, `stock_connectivity_summary.csv`, `stock_connectivity_credible_intervals.csv`, `movement_path_metrics.csv`, `movement_agent_space_use.csv`, and `posterior_predictive_summary.txt`.
+
+Inspecting stored Zarr checkpoints in Julia without re-running MCMC:
+
+```julia
+using TethysPath, Tethys, DataFrames, Statistics, SparseArrays
+
+store_dir = Tethys.lakehouse_dir("TethysPath")
+rc = Tethys.read_data(joinpath(store_dir, "movement_results_checkpoint.zarr"))
+loaded      = TethysPath._zarr_checkpoint_restore_loaded(rc["loaded"])
+kernels     = rc["kernels"]
+path_res    = rc["path_res"]
+diagnostics = rc["diagnostics"]
+validation  = rc["validation"]
+
+n_units       = loaded.mesh.n_units
+P             = sparse(Float64.(kernels.P_kernel))
+n_nonzero     = count(!iszero, P)
+sample_paths  = collect(values(path_res.paths))
+n_bottlenecks = count(path_res.domain_bottlenecks.bottleneck_mask)
+n_pinch       = count(diagnostics.circuit.pinch_mask)
+ppc_summary   = validation.posterior_predictive.summary
+```
 
 ---
 
